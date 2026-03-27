@@ -335,10 +335,54 @@ function main() {
 // --- Command stubs (replaced in subsequent tasks) ---
 
 function cmdList(args) {
-  exitWithError("list not yet implemented", 1);
+  var flags = parseFlags(args, 1);
+  var app = getApp();
+
+  var people;
+  if (flags.group) {
+    var groups = app.groups.whose({ name: flags.group })();
+    if (groups.length === 0)
+      exitWithError("group not found: " + flags.group, 3);
+    people = groups[0].people();
+  } else {
+    people = app.people();
+  }
+
+  var summaries = [];
+  for (var i = 0; i < people.length; i++) {
+    summaries.push(contactSummary(people[i]));
+  }
+
+  summaries.sort(function (a, b) {
+    return a.name.localeCompare(b.name);
+  });
+
+  writeStdout(formatTable(summaries));
 }
 function cmdSearch(args) {
-  exitWithError("search not yet implemented", 1);
+  if (args.length < 2) exitWithError("usage: cx search <query>", 1);
+  var query = args[1];
+  var app = getApp();
+
+  var people = app.people.whose({
+    _or: [
+      { firstName: { _contains: query } },
+      { lastName: { _contains: query } },
+      { name: { _contains: query } },
+      { organization: { _contains: query } },
+    ],
+  })();
+
+  var summaries = [];
+  for (var i = 0; i < people.length; i++) {
+    summaries.push(contactSummary(people[i]));
+  }
+
+  summaries.sort(function (a, b) {
+    return a.name.localeCompare(b.name);
+  });
+
+  writeStdout(formatTable(summaries));
 }
 function cmdGet(args) {
   exitWithError("get not yet implemented", 1);
