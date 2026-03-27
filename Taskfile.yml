@@ -23,6 +23,11 @@ tasks:
     cmds:
       - bash tests/test.sh
 
+  bench:
+    desc: Benchmark cx commands
+    cmds:
+      - bash tests/bench.sh
+
   lint:
     desc: Lint shell scripts and JavaScript
     cmds:

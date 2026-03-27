@@ -42,6 +42,27 @@ echo '{"firstName":"Jane","lastName":"Doe","emails":[{"label":"work","value":"ja
 
 Apple's `CNContactStore` requires the `com.apple.developer.contacts.notes` entitlement to access contact notes. This entitlement requires Apple approval and an app bundle. JXA via `osascript` has full access to all contact properties with no entitlements or signing required.
 
+## Performance
+
+Baseline benchmarks with ~479 contacts (2026-03-26, Apple M4):
+
+| Command        | Time  | Notes                                  |
+| -------------- | ----- | -------------------------------------- |
+| list           | ~70s  | Fetches all contacts + properties      |
+| search (hit)   | 1.1s  | `whose()` filters server-side          |
+| search (miss)  | 0.6s  |                                        |
+| create         | 0.6s  |                                        |
+| get            | 10.5s | Short ID resolution scans all contacts |
+| update         | 10.4s | Same resolve bottleneck                |
+| delete         | 10.3s | Same                                   |
+| groups create  | 0.15s |                                        |
+| groups list    | 0.3s  |                                        |
+| groups add     | 10.6s | Resolve bottleneck                     |
+| groups members | 0.2s  |                                        |
+| groups remove  | 10.2s | Resolve bottleneck                     |
+
+The main bottlenecks are `list` (per-contact property access) and short ID resolution (`app.people()` fetches all contacts). Run `task bench` to regenerate.
+
 ## Development
 
 ```bash
