@@ -147,7 +147,16 @@ function formatCard(person) {
     ["First", person.firstName()],
     ["Last", person.lastName()],
     ["Middle", person.middleName()],
-    ["Prefix", person.namePrefix ? person.namePrefix() : null],
+    [
+      "Prefix",
+      (function () {
+        try {
+          return person.namePrefix();
+        } catch (e) {
+          return null;
+        }
+      })(),
+    ],
     ["Suffix", person.suffix()],
     ["Nickname", person.nickname()],
     ["Maiden", person.maidenName()],
@@ -385,7 +394,10 @@ function cmdSearch(args) {
   writeStdout(formatTable(summaries));
 }
 function cmdGet(args) {
-  exitWithError("get not yet implemented", 1);
+  if (args.length < 2) exitWithError("usage: cx get <id>", 1);
+  var app = getApp();
+  var person = resolveId(app, args[1]);
+  writeStdout(formatCard(person));
 }
 function cmdCreate(args) {
   exitWithError("create not yet implemented", 1);
