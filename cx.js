@@ -551,10 +551,67 @@ function cmdCreate(args) {
   );
 }
 function cmdUpdate(args) {
-  exitWithError("update not yet implemented", 1);
+  if (args.length < 2)
+    exitWithError("usage: cx update <id> [--field value ...]", 1);
+  var app = getApp();
+  var person = resolveId(app, args[1]);
+  var flags = parseFlags(args, 2);
+
+  if (flags.json) {
+    var input = readStdin().trim();
+    if (!input) exitWithError("--json requires JSON on stdin", 1);
+    try {
+      flags = JSON.parse(input);
+    } catch (e) {
+      exitWithError("invalid JSON: " + e.message, 1);
+    }
+    if (flags.firstName !== undefined) flags.first = flags.firstName;
+    if (flags.lastName !== undefined) flags.last = flags.lastName;
+    if (flags.middleName !== undefined) flags.middle = flags.middleName;
+    if (flags.nameSuffix !== undefined) flags.suffix = flags.nameSuffix;
+    if (flags.organization !== undefined) flags.org = flags.organization;
+    if (flags.jobTitle !== undefined) flags.title = flags.jobTitle;
+    if (flags.department !== undefined) flags.dept = flags.department;
+    flags.json = true;
+  }
+
+  applyScalarFields(person, flags);
+
+  if (!flags.json) {
+    addMultiValueFields(app, person, flags);
+  }
+
+  app.save();
+  writeStdout(
+    "Updated " +
+      (person.name() || "(no name)") +
+      " (" +
+      shortId(person.id()) +
+      ")",
+  );
 }
 function cmdDelete(args) {
-  exitWithError("delete not yet implemented", 1);
+  if (args.length < 2) exitWithError("usage: cx delete <id> [--force]", 1);
+  var app = getApp();
+  var person = resolveId(app, args[1]);
+  var flags = parseFlags(args, 2);
+  var name = person.name() || "(no name)";
+  var sid = shortId(person.id());
+
+  if (!flags.force) {
+    var s = contactSummary(person);
+    writeStdout("Will delete: " + s.name + " (" + sid + ")");
+    if (s.email) writeStdout("  Email: " + s.email);
+    if (s.phone) writeStdout("  Phone: " + s.phone);
+    if (s.organization) writeStdout("  Org:   " + s.organization);
+    writeStdout("\nRe-run with --force to confirm.");
+    ObjC.import("stdlib");
+    $.exit(5);
+  }
+
+  app.delete(person);
+  app.save();
+  writeStdout("Deleted " + name + " (" + sid + ")");
 }
 function cmdGroups(args) {
   exitWithError("groups not yet implemented", 1);
