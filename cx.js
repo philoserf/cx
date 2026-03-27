@@ -614,7 +614,120 @@ function cmdDelete(args) {
   writeStdout("Deleted " + name + " (" + sid + ")");
 }
 function cmdGroups(args) {
-  exitWithError("groups not yet implemented", 1);
+  if (args.length < 2) exitWithError("usage: cx groups <subcommand> [args]", 1);
+  var sub = args[1];
+  var app = getApp();
+
+  switch (sub) {
+    case "list":
+      groupsList(app);
+      break;
+    case "members":
+      if (args.length < 3) exitWithError("usage: cx groups members <name>", 1);
+      groupsMembers(app, args[2]);
+      break;
+    case "add":
+      if (args.length < 4)
+        exitWithError("usage: cx groups add <contact-id> <group-name>", 1);
+      groupsAdd(app, args[2], args[3]);
+      break;
+    case "remove":
+      if (args.length < 4)
+        exitWithError("usage: cx groups remove <contact-id> <group-name>", 1);
+      groupsRemove(app, args[2], args[3]);
+      break;
+    case "create":
+      if (args.length < 3) exitWithError("usage: cx groups create <name>", 1);
+      groupsCreate(app, args[2]);
+      break;
+    case "delete":
+      if (args.length < 3)
+        exitWithError("usage: cx groups delete <name> [--force]", 1);
+      groupsDelete(app, args[2], parseFlags(args, 3));
+      break;
+    default:
+      exitWithError("unknown groups subcommand: " + sub, 1);
+  }
+}
+
+function groupsList(app) {
+  var groups = app.groups();
+  if (groups.length === 0) {
+    writeStdout("(no groups)");
+    return;
+  }
+  var names = [];
+  for (var i = 0; i < groups.length; i++) {
+    names.push(groups[i].name());
+  }
+  names.sort();
+  writeStdout(names.join("\n"));
+}
+
+function groupsMembers(app, name) {
+  var groups = app.groups.whose({ name: name })();
+  if (groups.length === 0) exitWithError("group not found: " + name, 3);
+
+  var people = groups[0].people();
+  var summaries = [];
+  for (var i = 0; i < people.length; i++) {
+    summaries.push(contactSummary(people[i]));
+  }
+  summaries.sort(function (a, b) {
+    return a.name.localeCompare(b.name);
+  });
+  writeStdout(formatTable(summaries));
+}
+
+function groupsAdd(app, contactId, groupName) {
+  var person = resolveId(app, contactId);
+  var groups = app.groups.whose({ name: groupName })();
+  if (groups.length === 0) exitWithError("group not found: " + groupName, 3);
+
+  app.add(person, { to: groups[0] });
+  app.save();
+  writeStdout("Added " + (person.name() || "(no name)") + " to " + groupName);
+}
+
+function groupsRemove(app, contactId, groupName) {
+  var person = resolveId(app, contactId);
+  var groups = app.groups.whose({ name: groupName })();
+  if (groups.length === 0) exitWithError("group not found: " + groupName, 3);
+
+  app.remove(person, { from: groups[0] });
+  app.save();
+  writeStdout(
+    "Removed " + (person.name() || "(no name)") + " from " + groupName,
+  );
+}
+
+function groupsCreate(app, name) {
+  var existing = app.groups.whose({ name: name })();
+  if (existing.length > 0) exitWithError("group already exists: " + name, 1);
+
+  var group = app.Group({ name: name });
+  app.groups.push(group);
+  app.save();
+  writeStdout("Created group: " + name);
+}
+
+function groupsDelete(app, name, flags) {
+  var groups = app.groups.whose({ name: name })();
+  if (groups.length === 0) exitWithError("group not found: " + name, 3);
+
+  if (!flags.force) {
+    var memberCount = groups[0].people().length;
+    writeStdout(
+      "Will delete group: " + name + " (" + memberCount + " members)",
+    );
+    writeStdout("\nRe-run with --force to confirm.");
+    ObjC.import("stdlib");
+    $.exit(5);
+  }
+
+  app.delete(groups[0]);
+  app.save();
+  writeStdout("Deleted group: " + name);
 }
 
 // --- Run ---
