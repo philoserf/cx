@@ -1,0 +1,15 @@
+{
+	"$schema": "https://biomejs.dev/schemas/latest/schema.json",
+	"javascript": {
+		"globals": ["ObjC", "$", "Application"]
+	},
+	"files": {
+		"includes": ["cx.js"]
+	},
+	"linter": {
+		"enabled": true
+	},
+	"formatter": {
+		"enabled": true
+	}
+}

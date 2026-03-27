@@ -24,12 +24,14 @@ tasks:
       - bash tests/test.sh
 
   lint:
-    desc: Lint shell scripts
+    desc: Lint shell scripts and JavaScript
     cmds:
       - shellcheck {{.SHELL_FILES}}
       - shfmt -d {{.SHELL_FILES}}
+      - bunx @biomejs/biome check cx.js
 
   fmt:
-    desc: Format shell scripts
+    desc: Format shell scripts and JavaScript
     cmds:
       - shfmt -w {{.SHELL_FILES}}
+      - bunx @biomejs/biome check --fix cx.js
