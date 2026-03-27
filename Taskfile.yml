@@ -1,0 +1,35 @@
+version: "3"
+
+vars:
+  SHELL_FILES: cx tests/test.sh
+  INSTALL_DIR: "{{.HOME}}/.local/bin"
+
+tasks:
+  install:
+    desc: Symlink cx to ~/.local/bin
+    cmds:
+      - mkdir -p {{.INSTALL_DIR}}
+      - ln -sf "$(pwd)/cx" {{.INSTALL_DIR}}/cx
+    status:
+      - test -L {{.INSTALL_DIR}}/cx
+
+  uninstall:
+    desc: Remove cx symlink
+    cmds:
+      - rm -f {{.INSTALL_DIR}}/cx
+
+  test:
+    desc: Run integration tests
+    cmds:
+      - bash tests/test.sh
+
+  lint:
+    desc: Lint shell scripts
+    cmds:
+      - shellcheck {{.SHELL_FILES}}
+      - shfmt -d {{.SHELL_FILES}}
+
+  fmt:
+    desc: Format shell scripts
+    cmds:
+      - shfmt -w {{.SHELL_FILES}}

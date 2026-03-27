@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve real path (follow symlinks) to find cx.js
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0")")" && pwd)"
+
+exec osascript -l JavaScript "$SCRIPT_DIR/cx.js" -- "$@"
