@@ -46,6 +46,6 @@ Apple's `CNContactStore` requires the `com.apple.developer.contacts.notes` entit
 
 ```bash
 task test     # Run integration tests
-task lint     # shellcheck + shfmt
-task fmt      # Auto-format shell scripts
+task lint     # shellcheck + shfmt for shell, biome for JS
+task fmt      # Auto-format shell scripts and JS
 ```

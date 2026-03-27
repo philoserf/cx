@@ -19,8 +19,8 @@ JXA has no module system. Everything is in one file by design.
 
 ```bash
 task test       # Run integration tests (creates/deletes test contacts)
-task lint       # shellcheck + shfmt -d on shell scripts
-task fmt        # shfmt -w on shell scripts
+task lint       # shellcheck + shfmt on shell scripts, biome on cx.js
+task fmt        # shfmt + biome --fix
 task install    # Symlink cx to ~/.local/bin
 task uninstall  # Remove symlink
 ```
