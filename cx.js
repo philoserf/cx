@@ -341,7 +341,82 @@ function main() {
   }
 }
 
-// --- Command stubs (replaced in subsequent tasks) ---
+// --- Multi-value field helpers ---
+
+function parseLabelValue(str, defaultLabel) {
+  var colonIdx = str.indexOf(":");
+  if (colonIdx > 0 && colonIdx < str.length - 1) {
+    var beforeColon = str.substring(0, colonIdx);
+    if (
+      beforeColon === "http" ||
+      beforeColon === "https" ||
+      beforeColon === "tel" ||
+      beforeColon === "mailto"
+    ) {
+      return { label: defaultLabel, value: str };
+    }
+    return {
+      label: str.substring(0, colonIdx),
+      value: str.substring(colonIdx + 1),
+    };
+  }
+  return { label: defaultLabel, value: str };
+}
+
+function applyScalarFields(person, flags) {
+  if (flags.first !== undefined) person.firstName = flags.first;
+  if (flags.last !== undefined) person.lastName = flags.last;
+  if (flags.middle !== undefined) person.middleName = flags.middle;
+  if (flags.suffix !== undefined) person.suffix = flags.suffix;
+  if (flags.nickname !== undefined) person.nickname = flags.nickname;
+  if (flags.maiden !== undefined) person.maidenName = flags.maiden;
+  if (flags.org !== undefined) person.organization = flags.org;
+  if (flags.title !== undefined) person.jobTitle = flags.title;
+  if (flags.dept !== undefined) person.department = flags.dept;
+  if (flags.note !== undefined) person.note = flags.note;
+  if (flags.birthday !== undefined) {
+    person.birthDate = new Date(flags.birthday);
+  }
+}
+
+function addMultiValueFields(app, person, flags) {
+  if (flags.email) {
+    for (var i = 0; i < flags.email.length; i++) {
+      var e = parseLabelValue(flags.email[i], "home");
+      person.emails.push(app.Email({ label: e.label, value: e.value }));
+    }
+  }
+  if (flags.phone) {
+    for (var j = 0; j < flags.phone.length; j++) {
+      var ph = parseLabelValue(flags.phone[j], "home");
+      person.phones.push(app.Phone({ label: ph.label, value: ph.value }));
+    }
+  }
+  if (flags.url) {
+    for (var k = 0; k < flags.url.length; k++) {
+      var u = parseLabelValue(flags.url[k], "home");
+      person.urls.push(app.Url({ label: u.label, value: u.value }));
+    }
+  }
+  if (flags.related) {
+    for (var r = 0; r < flags.related.length; r++) {
+      var rel = parseLabelValue(flags.related[r], "friend");
+      person.relatedNames.push(
+        app.RelatedName({ label: rel.label, value: rel.value }),
+      );
+    }
+  }
+  if (flags.date) {
+    for (var d = 0; d < flags.date.length; d++) {
+      var dt = parseLabelValue(flags.date[d], "anniversary");
+      person.customDates.push(
+        app.CustomDate({ label: dt.label, value: dt.value }),
+      );
+    }
+  }
+}
+
+// --- Commands ---
 
 function cmdList(args) {
   var flags = parseFlags(args, 1);
@@ -400,7 +475,80 @@ function cmdGet(args) {
   writeStdout(formatCard(person));
 }
 function cmdCreate(args) {
-  exitWithError("create not yet implemented", 1);
+  var flags = parseFlags(args, 1);
+  var app = getApp();
+
+  if (flags.json) {
+    var input = readStdin().trim();
+    if (!input) exitWithError("--json requires JSON on stdin", 1);
+    try {
+      flags = JSON.parse(input);
+    } catch (e) {
+      exitWithError("invalid JSON: " + e.message, 1);
+    }
+    if (flags.firstName !== undefined) flags.first = flags.firstName;
+    if (flags.lastName !== undefined) flags.last = flags.lastName;
+    if (flags.middleName !== undefined) flags.middle = flags.middleName;
+    if (flags.nameSuffix !== undefined) flags.suffix = flags.nameSuffix;
+    if (flags.organization !== undefined) flags.org = flags.organization;
+    if (flags.jobTitle !== undefined) flags.title = flags.jobTitle;
+    if (flags.department !== undefined) flags.dept = flags.department;
+    flags.json = true;
+  }
+
+  if (!flags.first && !flags.last) {
+    exitWithError("create requires at least --first or --last", 1);
+  }
+
+  var personProps = {};
+  if (flags.first) personProps.firstName = flags.first;
+  if (flags.last) personProps.lastName = flags.last;
+
+  var person = app.Person(personProps);
+  app.people.push(person);
+
+  applyScalarFields(person, flags);
+
+  if (flags.json && !Array.isArray(flags.email)) {
+    if (flags.emails) {
+      for (var i = 0; i < flags.emails.length; i++) {
+        person.emails.push(
+          app.Email({
+            label: flags.emails[i].label || "home",
+            value: flags.emails[i].value,
+          }),
+        );
+      }
+    }
+    if (flags.phones) {
+      for (var j = 0; j < flags.phones.length; j++) {
+        person.phones.push(
+          app.Phone({
+            label: flags.phones[j].label || "home",
+            value: flags.phones[j].value,
+          }),
+        );
+      }
+    }
+  } else {
+    addMultiValueFields(app, person, flags);
+  }
+
+  if (flags.group) {
+    var groups = app.groups.whose({ name: flags.group })();
+    if (groups.length === 0)
+      exitWithError("group not found: " + flags.group, 3);
+    app.add(person, { to: groups[0] });
+  }
+
+  app.save();
+  writeStdout(
+    "Created " +
+      (person.name() || "(no name)") +
+      " (" +
+      shortId(person.id()) +
+      ")",
+  );
 }
 function cmdUpdate(args) {
   exitWithError("update not yet implemented", 1);
