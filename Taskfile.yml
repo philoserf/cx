@@ -1,7 +1,7 @@
 version: "3"
 
 vars:
-  SHELL_FILES: cx tests/test.sh
+  SHELL_FILES: cx tests/test.sh tests/bench.sh
   INSTALL_DIR: "{{.HOME}}/.local/bin"
 
 tasks:
