@@ -47,12 +47,19 @@ function saveOrFail(app) {
 // Nothing that can fail may run after app.people.push, or a partly-built
 // contact is left in the store with no save to complete it. Parsing here is
 // cheap and pure, so the later real parse just repeats it.
-function validateFields(flags) {
-	if (flags.birthday !== undefined) parseDateFlag(flags.birthday, "birthday");
-	if (flags.date) {
-		for (let i = 0; i < flags.date.length; i++) {
-			const dt = parseLabelValue(flags.date[i], "anniversary");
-			parseDateFlag(dt.value, "date");
+function validateFields(fields) {
+	if (fields.birthday !== undefined) {
+		parseDateFlag(fields.birthday, "birthday");
+	}
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (spec.type !== "date" || !spec.flag || !fields[spec.flag]) continue;
+		const values = fields[spec.flag];
+		for (let j = 0; j < values.length; j++) {
+			parseDateFlag(
+				parseLabelValue(values[j], spec.defaultLabel).value,
+				spec.flag,
+			);
 		}
 	}
 }
@@ -289,18 +296,11 @@ function formatCard(person) {
 	const birthday = person.birthDate();
 	if (birthday) lines.push(`Birthday:     ${formatDate(birthday)}`);
 
-	const multiFields = [
-		["Email", person.emails()],
-		["Phone", person.phones()],
-		["URL", person.urls()],
-		["Related", person.relatedNames()],
-		["IM", person.instantMessages()],
-		["Date", person.customDates()],
-	];
-	for (let k = 0; k < multiFields.length; k++) {
-		const items = multiFields[k][1];
+	for (let k = 0; k < MULTI.length; k++) {
+		const spec = MULTI[k];
+		const items = person[spec.coll]();
 		for (let m = 0; m < items.length; m++) {
-			const label = items[m].label() || multiFields[k][0];
+			const label = items[m].label() || spec.display;
 			lines.push(padRight(`${label}:`, 14) + formatValue(items[m].value()));
 		}
 	}
@@ -353,7 +353,59 @@ function getArgs() {
 	return args;
 }
 
-const REPEATABLE = ["email", "phone", "url", "related", "date"];
+// One row per repeatable field, read by the parser, the writer, the JSON
+// collection writer and the renderer. Adding a field is one row; before this
+// it was four edits in four places, and missing one gave a field that parsed
+// but never rendered. Order here is the order they appear on a card.
+const MULTI = [
+	{
+		flag: "email",
+		json: "emails",
+		coll: "emails",
+		ctor: "Email",
+		defaultLabel: "home",
+		display: "Email",
+	},
+	{
+		flag: "phone",
+		json: "phones",
+		coll: "phones",
+		ctor: "Phone",
+		defaultLabel: "home",
+		display: "Phone",
+	},
+	{
+		flag: "url",
+		coll: "urls",
+		ctor: "Url",
+		defaultLabel: "home",
+		display: "URL",
+	},
+	{
+		flag: "related",
+		coll: "relatedNames",
+		ctor: "RelatedName",
+		defaultLabel: "friend",
+		display: "Related",
+	},
+	// No flag: Contacts holds instant messages, cx only renders them.
+	{ coll: "instantMessages", display: "IM" },
+	{
+		flag: "date",
+		coll: "customDates",
+		ctor: "CustomDate",
+		defaultLabel: "anniversary",
+		display: "Date",
+		type: "date",
+	},
+];
+
+function multiSpecForFlag(flag) {
+	for (let i = 0; i < MULTI.length; i++) {
+		if (MULTI[i].flag === flag) return MULTI[i];
+	}
+	return null;
+}
 
 // JSON input uses Contacts' own property names; flag input uses short forms.
 const JSON_KEY_ALIASES = {
@@ -385,7 +437,7 @@ function parseArgs(args, startIndex) {
 			flags.json = true;
 		} else if (i + 1 < args.length) {
 			i++;
-			if (REPEATABLE.indexOf(key) !== -1) {
+			if (multiSpecForFlag(key)) {
 				if (!flags[key]) flags[key] = [];
 				flags[key].push(args[i]);
 			} else {
@@ -546,62 +598,35 @@ function applyScalarFields(person, flags) {
 // JSON supplies emails and phones as {label, value} objects where flag input
 // supplies "label:value" strings. Only JSON produces these keys.
 function addObjectCollections(app, person, fields) {
-	if (fields.emails) {
-		for (let i = 0; i < fields.emails.length; i++) {
-			person.emails.push(
-				app.Email({
-					label: fields.emails[i].label || "home",
-					value: fields.emails[i].value,
-				}),
-			);
-		}
-	}
-	if (fields.phones) {
-		for (let j = 0; j < fields.phones.length; j++) {
-			person.phones.push(
-				app.Phone({
-					label: fields.phones[j].label || "home",
-					value: fields.phones[j].value,
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.json || !fields[spec.json]) continue;
+		const items = fields[spec.json];
+		for (let j = 0; j < items.length; j++) {
+			person[spec.coll].push(
+				app[spec.ctor]({
+					label: items[j].label || spec.defaultLabel,
+					value: items[j].value,
 				}),
 			);
 		}
 	}
 }
 
-function addMultiValueFields(app, person, flags) {
-	if (flags.email) {
-		for (let i = 0; i < flags.email.length; i++) {
-			const e = parseLabelValue(flags.email[i], "home");
-			person.emails.push(app.Email({ label: e.label, value: e.value }));
-		}
-	}
-	if (flags.phone) {
-		for (let j = 0; j < flags.phone.length; j++) {
-			const ph = parseLabelValue(flags.phone[j], "home");
-			person.phones.push(app.Phone({ label: ph.label, value: ph.value }));
-		}
-	}
-	if (flags.url) {
-		for (let k = 0; k < flags.url.length; k++) {
-			const u = parseLabelValue(flags.url[k], "home");
-			person.urls.push(app.Url({ label: u.label, value: u.value }));
-		}
-	}
-	if (flags.related) {
-		for (let r = 0; r < flags.related.length; r++) {
-			const rel = parseLabelValue(flags.related[r], "friend");
-			person.relatedNames.push(
-				app.RelatedName({ label: rel.label, value: rel.value }),
-			);
-		}
-	}
-	if (flags.date) {
-		for (let d = 0; d < flags.date.length; d++) {
-			const dt = parseLabelValue(flags.date[d], "anniversary");
-			person.customDates.push(
-				app.CustomDate({
-					label: dt.label,
-					value: parseDateFlag(dt.value, "date"),
+function addMultiValueFields(app, person, fields) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.flag || !fields[spec.flag]) continue;
+		const values = fields[spec.flag];
+		for (let j = 0; j < values.length; j++) {
+			const lv = parseLabelValue(values[j], spec.defaultLabel);
+			person[spec.coll].push(
+				app[spec.ctor]({
+					label: lv.label,
+					value:
+						spec.type === "date"
+							? parseDateFlag(lv.value, spec.flag)
+							: lv.value,
 				}),
 			);
 		}

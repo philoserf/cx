@@ -220,6 +220,24 @@ CREATED_IDS+=("$JGROUP_ID")
 output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
 assert_contains "${JGROUP_PREFIX}" "$output"
 
+# --- Test: multi-value fields ---
+# All five repeatable fields in one create. Only emails and phones were
+# covered before, which left url, related and date unexercised.
+echo ""
+echo "=== Multi-value fields ==="
+MULTI_PREFIX="${TEST_PREFIX}M"
+output=$("$CX" create --first "${MULTI_PREFIX}" --last "Person" --email "work:${MULTI_PREFIX}@example.com" --phone "mobile:555-0175" --url "homepage:https://example.com/${MULTI_PREFIX}" --related "friend:Some Friend" --date "anniversary:2011-07-08" 2>&1)
+echo "$output"
+MULTI_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$MULTI_ID")
+
+output=$("$CX" get "$MULTI_ID" 2>&1)
+assert_contains "${MULTI_PREFIX}@example.com" "$output"
+assert_contains "555-0175" "$output"
+assert_contains "https://example.com/${MULTI_PREFIX}" "$output"
+assert_contains "Some Friend" "$output"
+assert_contains "2011-07-08" "$output"
+
 # --- Test: dates ---
 # Regression for the timezone defect: a birthday entered as 1990-05-14 was
 # stored as 1990-05-13 in any negative UTC offset, because new Date() parses a
