@@ -494,7 +494,7 @@ function parseArgs(args, startIndex) {
 			flags.json = true;
 		} else if (i + 1 < args.length) {
 			i++;
-			if (multiSpecForFlag(key)) {
+			if (key === "replace" || multiSpecForFlag(key)) {
 				if (!flags[key]) flags[key] = [];
 				flags[key].push(args[i]);
 			} else {
@@ -670,6 +670,44 @@ function applyScalarFields(person, fields) {
 
 // JSON supplies emails and phones as {label, value} objects where flag input
 // supplies "label:value" strings. Only JSON produces these keys.
+// --replace <field> empties a collection before the append pass. That is also
+// how a collection is cleared: --replace email with no --email leaves none.
+// It is the only operation that destroys data below the person level, so an
+// unknown field name is an error rather than a silent no-op.
+function clearReplacedCollections(app, person, fields) {
+	if (!fields.replace) return;
+	for (let i = 0; i < fields.replace.length; i++) {
+		const spec = multiSpecForFlag(fields.replace[i]);
+		if (!spec) {
+			exitWithError(
+				`--replace expects a repeatable field name, got: ${fields.replace[i]}`,
+				1,
+			);
+		}
+		clearCollection(app, person, spec);
+	}
+}
+
+function clearCollection(app, person, spec) {
+	const items = person[spec.coll]();
+	// Backwards: deleting shifts the indices of everything after.
+	for (let j = items.length - 1; j >= 0; j--) {
+		app.delete(items[j]);
+	}
+}
+
+// A JSON update replaces any collection its payload names, where flag input
+// appends unless told otherwise. Both semantics are now stated; before this,
+// JSON update silently ignored collections altogether.
+function replaceObjectCollections(app, person, fields) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.json || !fields[spec.json]) continue;
+		clearCollection(app, person, spec);
+	}
+	addObjectCollections(app, person, fields);
+}
+
 function addObjectCollections(app, person, fields) {
 	for (let i = 0; i < MULTI.length; i++) {
 		const spec = MULTI[i];
@@ -794,9 +832,11 @@ function cmdUpdate(args) {
 	applyScalarFields(person, fields);
 	applyNote(person, fields);
 
-	// JSON update still cannot add multi-values. E3 gives it replace semantics.
 	if (input.source === "flags") {
+		clearReplacedCollections(app, person, fields);
 		addMultiValueFields(app, person, fields);
+	} else {
+		replaceObjectCollections(app, person, fields);
 	}
 
 	saveOrFail(app);

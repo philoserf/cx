@@ -179,10 +179,10 @@ output=$("$CX" get "$JSON_ID" 2>&1)
 assert_contains "json updated note" "$output"
 assert_contains "Verification" "$output"
 
-# Characterization: cmdUpdate skips addMultiValueFields in JSON mode, so an
-# "emails" key on update is silently ignored. Commit E3 gives JSON update
-# replace semantics for collections — invert this assertion then.
-assert_not_contains "${JSON_PREFIX}-home@example.com" "$output"
+# JSON update replaces any collection its payload names, as of E3. It used to
+# ignore collections entirely, because cmdUpdate skipped addMultiValueFields
+# whenever the input was JSON.
+assert_contains "${JSON_PREFIX}-home@example.com" "$output"
 
 # --- Test: list ---
 # The only coverage of cmdList. Slow (~70s on a real address book) until the
@@ -312,6 +312,26 @@ assert_contains "replacement note" "$output"
 output=$("$CX" get "$NOTE_ID" 2>&1)
 assert_contains "second note" "$output"
 assert_contains "appended line" "$output"
+
+# --- Test: replace and clear ---
+echo ""
+echo "=== Replace ==="
+REP_PREFIX="${TEST_PREFIX}R"
+output=$("$CX" create --first "${REP_PREFIX}" --last "Person" --email "work:${REP_PREFIX}a@example.com" --email "home:${REP_PREFIX}b@example.com" 2>&1)
+REP_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$REP_ID")
+
+"$CX" update "$REP_ID" --replace email --email "work:${REP_PREFIX}c@example.com"
+output=$("$CX" get "$REP_ID" 2>&1)
+assert_contains "${REP_PREFIX}c@example.com" "$output"
+assert_not_contains "${REP_PREFIX}a@example.com" "$output"
+
+# --replace with nothing to add is how a collection is cleared
+"$CX" update "$REP_ID" --replace email
+output=$("$CX" get "$REP_ID" 2>&1)
+assert_not_contains "${REP_PREFIX}c@example.com" "$output"
+
+assert_exit 1 "$CX" update "$REP_ID" --replace bogusfield
 
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
