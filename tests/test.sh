@@ -221,6 +221,26 @@ CREATED_IDS+=("$JGROUP_ID")
 output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
 assert_not_contains "${JGROUP_PREFIX}" "$output"
 
+# --- Test: dates ---
+# Regression for the timezone defect: a birthday entered as 1990-05-14 was
+# stored as 1990-05-13 in any negative UTC offset, because new Date() parses a
+# date-only string as UTC midnight. --date took a raw string where --birthday
+# took a Date; both now parse identically.
+echo ""
+echo "=== Dates ==="
+DATE_PREFIX="${TEST_PREFIX}D"
+output=$("$CX" create --first "${DATE_PREFIX}" --last "Person" --birthday 1990-05-14 --date "anniversary:2000-01-02" 2>&1)
+echo "$output"
+DATE_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$DATE_ID")
+
+output=$("$CX" get "$DATE_ID" 2>&1)
+assert_contains "1990-05-14" "$output"
+assert_contains "2000-01-02" "$output"
+
+assert_exit 1 "$CX" create --first "${DATE_PREFIX}bad" --birthday "14 May 1990"
+assert_exit 1 "$CX" create --first "${DATE_PREFIX}bad" --birthday "2026-02-30"
+
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
 # holds for any non-trivial address book. Exit 3 here would mean the prefix

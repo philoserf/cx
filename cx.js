@@ -46,7 +46,44 @@ function getApp() {
 }
 
 function shortId(fullId) {
-	return fullId.substring(0, 8);
+	return String(fullId).substring(0, 8);
+}
+
+// Contacts stores a birthday as a date-only value at noon local time. Parsing
+// "1990-05-14" with new Date() gives UTC midnight, which is the previous day
+// in any negative UTC offset, and Contacts then records May 13. Building from
+// local components at noon avoids that, and avoids the timezones that skip
+// midnight entirely on a DST transition.
+function parseDateFlag(str, flagName) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+	if (!m) {
+		exitWithError(`--${flagName} must be YYYY-MM-DD, got: ${str}`, 1);
+	}
+	const year = Number(m[1]);
+	const month = Number(m[2]);
+	const day = Number(m[3]);
+	const date = new Date(year, month - 1, day, 12, 0, 0);
+	if (
+		date.getFullYear() !== year ||
+		date.getMonth() !== month - 1 ||
+		date.getDate() !== day
+	) {
+		exitWithError(`--${flagName} is not a real date: ${str}`, 1);
+	}
+	return date;
+}
+
+function formatDate(date) {
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	return `${date.getFullYear()}-${month}-${day}`;
+}
+
+// Custom dates come back as Date objects; every other multi-value is a string.
+function formatValue(value) {
+	return value && typeof value.getFullYear === "function"
+		? formatDate(value)
+		: value;
 }
 
 function resolveId(app, idArg) {
@@ -166,8 +203,7 @@ function formatCard(person) {
 	}
 
 	const birthday = person.birthDate();
-	if (birthday)
-		lines.push(`Birthday:     ${birthday.toISOString().substring(0, 10)}`);
+	if (birthday) lines.push(`Birthday:     ${formatDate(birthday)}`);
 
 	const multiFields = [
 		["Email", person.emails()],
@@ -181,7 +217,7 @@ function formatCard(person) {
 		const items = multiFields[k][1];
 		for (let m = 0; m < items.length; m++) {
 			const label = items[m].label() || multiFields[k][0];
-			lines.push(padRight(`${label}:`, 14) + items[m].value());
+			lines.push(padRight(`${label}:`, 14) + formatValue(items[m].value()));
 		}
 	}
 
@@ -362,7 +398,7 @@ function applyScalarFields(person, flags) {
 	if (flags.dept !== undefined) person.department = flags.dept;
 	if (flags.note !== undefined) person.note = flags.note;
 	if (flags.birthday !== undefined) {
-		person.birthDate = new Date(flags.birthday);
+		person.birthDate = parseDateFlag(flags.birthday, "birthday");
 	}
 }
 
@@ -397,7 +433,10 @@ function addMultiValueFields(app, person, flags) {
 		for (let d = 0; d < flags.date.length; d++) {
 			const dt = parseLabelValue(flags.date[d], "anniversary");
 			person.customDates.push(
-				app.CustomDate({ label: dt.label, value: dt.value }),
+				app.CustomDate({
+					label: dt.label,
+					value: parseDateFlag(dt.value, "date"),
+				}),
 			);
 		}
 	}
