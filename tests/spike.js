@@ -110,7 +110,30 @@ if (!people) {
 			const v = app.people.whose({ id: { _beginsWith: prefix } })();
 			return { note: `${v.length} match for ${prefix}` };
 		});
+		// resolveId matched with indexOf, which is case sensitive. If the
+		// server-side query is not, lowercase short IDs start working.
+		time("whose: id _beginsWith lowercase", () => {
+			const lower = prefix.toLowerCase();
+			const v = app.people.whose({ id: { _beginsWith: lower } })();
+			return { note: `${v.length} match for ${lower}` };
+		});
 	}
+
+	// cmdList reads app.people, but cmdSearch reads a whose() specifier and
+	// groupsMembers reads a group's people. If plural access works on those
+	// too, one bulk reader serves all three; if not, they keep the per-object
+	// loop, which is already sub-second at their sizes.
+	time("plural on whose() specifier", () => {
+		const v = app.people.whose({ name: { _contains: "a" } }).name();
+		return { note: `${v.length} names` };
+	});
+
+	time("plural on group.people", () => {
+		const groups = app.groups();
+		if (groups.length === 0) return { note: "no groups on this machine" };
+		const v = groups[0].people.name();
+		return { note: `${v.length} names in ${groups[0].name()}` };
+	});
 
 	out("");
 	out("Ordering check — plural arrays must line up by index or E1 would");

@@ -52,22 +52,12 @@ function shortId(fullId) {
 function resolveId(app, idArg) {
 	if (!idArg) exitWithError("missing contact ID", 1);
 
-	// Try full ID first
-	try {
-		const p = app.people.byId(idArg);
-		p.name(); // force evaluation — throws if not found
-		return p;
-	} catch (_e) {
-		// Not a full ID — try short ID match
-	}
-
-	const allPeople = app.people();
-	const matches = [];
-	for (let i = 0; i < allPeople.length; i++) {
-		if (allPeople[i].id().indexOf(idArg) === 0) {
-			matches.push(allPeople[i]);
-		}
-	}
+	// One server-side prefix query handles both forms — a full UUID:ABPerson
+	// id is a prefix of itself — in a single Apple Event. The previous
+	// implementation fetched every person and called id() on each, which is
+	// one round trip per contact and the reason get/update/delete and
+	// groups add/remove all cost ~10s.
+	const matches = app.people.whose({ id: { _beginsWith: idArg } })();
 
 	if (matches.length === 0) {
 		exitWithError(`no contact matching ID ${idArg}`, 3);
