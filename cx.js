@@ -182,7 +182,7 @@ function resolveId(app, idArg) {
 	return matches[0];
 }
 
-function contactSummary(person) {
+function readSummary(person) {
 	const name = person.name() || "(no name)";
 	let email = "";
 	let phone = "";
@@ -210,7 +210,7 @@ function contactSummary(person) {
 //
 // Only valid on an element collection — app.people, or a group's people.
 // Plural access on a whose() specifier measured 13.3s for 256 names, worse
-// than the loop, so cmdSearch keeps contactSummary.
+// than the loop, so cmdSearch keeps readSummary.
 function readSummaries(collection) {
 	const ids = collection.id();
 	const names = collection.name();
@@ -275,15 +275,14 @@ function padRight(str, len) {
 	return str + " ".repeat(len - str.length);
 }
 
-function formatCard(person) {
-	const lines = [];
-	const id = person.id();
-
-	lines.push(`ID:           ${shortId(id)} (${id})`);
-
+// Reading and rendering are separate: readCard turns a live Contacts object
+// into a plain record, formatCard turns that record into text. Nothing below
+// this line touches a JXA object, which is what makes the card renderable
+// without Contacts.app — and serialisable, when --format json arrives.
+function readCard(person) {
+	const fields = {};
 	for (let i = 0; i < SCALARS.length; i++) {
 		const spec = SCALARS[i];
-		if (!spec.display) continue;
 		let value;
 		if (spec.guarded) {
 			try {
@@ -294,51 +293,84 @@ function formatCard(person) {
 		} else {
 			value = person[spec.prop]();
 		}
-		if (!value) continue;
-		lines.push(
-			padRight(`${spec.display}:`, 14) +
-				(spec.type === "date" ? formatDate(value) : value),
-		);
+		fields[spec.prop] =
+			value && spec.type === "date" ? formatDate(value) : value;
 	}
 
+	const multi = {};
 	for (let k = 0; k < MULTI.length; k++) {
 		const spec = MULTI[k];
 		const items = person[spec.coll]();
+		const list = [];
 		for (let m = 0; m < items.length; m++) {
-			const label = items[m].label() || spec.display;
-			lines.push(padRight(`${label}:`, 14) + formatValue(items[m].value()));
+			list.push({
+				label: items[m].label() || spec.display,
+				value: formatValue(items[m].value()),
+			});
+		}
+		multi[spec.coll] = list;
+	}
+
+	const addresses = [];
+	const rawAddresses = person.addresses();
+	for (let a = 0; a < rawAddresses.length; a++) {
+		addresses.push({
+			label: rawAddresses[a].label() || "Address",
+			value: (rawAddresses[a].formattedAddress() || "").replace(/\n/g, ", "),
+		});
+	}
+
+	const socialProfiles = [];
+	const rawSocial = person.socialProfiles();
+	for (let sp = 0; sp < rawSocial.length; sp++) {
+		socialProfiles.push({
+			label: rawSocial[sp].serviceName() || "Social",
+			value: rawSocial[sp].userName() || rawSocial[sp].url() || "",
+		});
+	}
+
+	return {
+		id: person.id(),
+		fields: fields,
+		multi: multi,
+		addresses: addresses,
+		socialProfiles: socialProfiles,
+		groups: person.groups().map((g) => g.name()),
+	};
+}
+
+function formatCard(record) {
+	const lines = [];
+
+	lines.push(`ID:           ${shortId(record.id)} (${record.id})`);
+
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (!spec.display) continue;
+		const value = record.fields[spec.prop];
+		if (value) lines.push(padRight(`${spec.display}:`, 14) + value);
+	}
+
+	for (let k = 0; k < MULTI.length; k++) {
+		const items = record.multi[MULTI[k].coll];
+		for (let m = 0; m < items.length; m++) {
+			lines.push(padRight(`${items[m].label}:`, 14) + items[m].value);
 		}
 	}
 
-	const addresses = person.addresses();
-	for (let a = 0; a < addresses.length; a++) {
-		const addr = addresses[a];
-		const formatted = addr.formattedAddress();
-		const addrLabel = addr.label() || "Address";
-		lines.push(
-			padRight(`${addrLabel}:`, 14) + (formatted || "").replace(/\n/g, ", "),
-		);
+	const extras = record.addresses.concat(record.socialProfiles);
+	for (let e = 0; e < extras.length; e++) {
+		lines.push(padRight(`${extras[e].label}:`, 14) + extras[e].value);
 	}
 
-	const socialProfiles = person.socialProfiles();
-	for (let s = 0; s < socialProfiles.length; s++) {
-		const sp = socialProfiles[s];
-		const svc = sp.serviceName() || "Social";
-		const user = sp.userName() || sp.url() || "";
-		lines.push(padRight(`${svc}:`, 14) + user);
+	if (record.groups.length > 0) {
+		lines.push(`Groups:       ${record.groups.join(", ")}`);
 	}
 
-	const groups = person.groups();
-	if (groups.length > 0) {
-		const groupNames = groups.map((g) => g.name());
-		lines.push(`Groups:       ${groupNames.join(", ")}`);
-	}
-
-	const note = person.note();
-	if (note) {
+	if (record.fields.note) {
 		lines.push("");
 		lines.push("Note:");
-		lines.push(note);
+		lines.push(record.fields.note);
 	}
 
 	return lines.join("\n");
@@ -681,7 +713,7 @@ function cmdSearch(args) {
 
 	const summaries = [];
 	for (let i = 0; i < people.length; i++) {
-		summaries.push(contactSummary(people[i]));
+		summaries.push(readSummary(people[i]));
 	}
 
 	printSummaries(summaries);
@@ -691,7 +723,7 @@ function cmdGet(args) {
 	if (positionals.length === 0) exitWithError("usage: cx get <id>", 1);
 	const app = getApp();
 	const person = resolveId(app, positionals[0]);
-	writeStdout(formatCard(person));
+	writeStdout(formatCard(readCard(person)));
 }
 function cmdCreate(args) {
 	const fields = readInput(args, 1).fields;
@@ -764,7 +796,7 @@ function cmdDelete(args) {
 	const sid = shortId(person.id());
 
 	if (!flags.force) {
-		const s = contactSummary(person);
+		const s = readSummary(person);
 		writeStdout(`Will delete: ${s.name} (${sid})`);
 		if (s.email) writeStdout(`  Email: ${s.email}`);
 		if (s.phone) writeStdout(`  Phone: ${s.phone}`);
