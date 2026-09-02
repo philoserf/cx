@@ -12,12 +12,18 @@ CREATED_GROUPS=()
 cleanup() {
 	echo ""
 	echo "--- Cleanup ---"
-	for id in "${CREATED_IDS[@]}"; do
-		"$CX" delete "$id" --force 2>/dev/null || true
-	done
-	for group in "${CREATED_GROUPS[@]}"; do
-		"$CX" groups delete "$group" --force 2>/dev/null || true
-	done
+	# bash 3.2 (stock macOS /bin/bash) errors on "${arr[@]}" for an empty
+	# array under set -u, and both arrays are emptied on a successful run.
+	if [[ ${#CREATED_IDS[@]} -gt 0 ]]; then
+		for id in "${CREATED_IDS[@]}"; do
+			"$CX" delete "$id" --force 2>/dev/null || true
+		done
+	fi
+	if [[ ${#CREATED_GROUPS[@]} -gt 0 ]]; then
+		for group in "${CREATED_GROUPS[@]}"; do
+			"$CX" groups delete "$group" --force 2>/dev/null || true
+		done
+	fi
 }
 trap cleanup EXIT
 
