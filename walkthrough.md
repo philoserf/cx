@@ -24,11 +24,15 @@ find . -not -path './.git/*' -not -path './.git' -not -name walkthrough.md -not 
 ./CLAUDE.md
 ./cx
 ./cx.js
+./.github
+./.github/workflows
+./.github/workflows/claude.yml
 ./README.md
 ./Taskfile.yml
 ./tests
 ./tests/bench.sh
 ./tests/test.sh
+./THEORY.md
 ```
 
 ## Entry Point: `cx` (bash wrapper)
@@ -169,7 +173,7 @@ function resolveId(app, idArg) {
 `formatTable()` renders summaries as a fixed-width columnar table.
 `formatCard()` renders a full contact as a labeled card — the detailed view for `cx get`.
 
-Note the `namePrefix` workaround at line 151: JXA throws `-1700 (Can't convert types)`
+Note the `namePrefix` workaround at line 153: JXA throws `-1700 (Can't convert types)`
 on some contacts, so it's wrapped in a try/catch IIFE.
 
 ```bash
@@ -539,7 +543,7 @@ function groupsCreate(app, name) {
 
 ## Testing
 
-`tests/test.sh` runs 19 integration tests against real Contacts.app data. It creates
+`tests/test.sh` runs 19 assertions against real Contacts.app data. It creates
 contacts with a `CxTest_$$` prefix (PID-scoped) and cleans up via an EXIT trap.
 
 Test count verification:
@@ -560,9 +564,9 @@ grep -c 'assert_' tests/test.sh
 22
 ```
 
-22 assert calls across usage, create, search, get, update, delete (with and without
-`--force`), groups lifecycle, and error cases. The 19 passing assertions at runtime
-reflect that some assertions share a test section.
+Three of those 22 matches are the helper definitions (`assert_exit`, `assert_contains`,
+`assert_not_contains`), leaving 19 assertion calls across usage, create, search, get,
+update, delete (with and without `--force`), groups lifecycle, and error cases.
 
 ## Linting and Formatting
 

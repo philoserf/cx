@@ -9,9 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture
 
 - `cx` — bash wrapper that runs `osascript -l JavaScript cx.js -- "$@"`
-- `cx.js` — all JXA logic in a single file (~735 lines): arg parsing, Contacts.app interface, text formatting, command dispatch
+- `cx.js` — all JXA logic in a single file (~720 lines): arg parsing, Contacts.app interface, text formatting, command dispatch
 - `tests/test.sh` — integration tests exercising full CRUD lifecycle against real Contacts.app
-- `Taskfile.yml` — install, test, lint, fmt tasks
+- `tests/bench.sh` — timing harness behind `task bench`; regenerates the README performance table
+- `Taskfile.yml` — install, uninstall, test, bench, lint, fmt tasks
 
 JXA has no module system. Everything is in one file by design.
 
@@ -19,6 +20,7 @@ JXA has no module system. Everything is in one file by design.
 
 ```bash
 task test       # Run integration tests (creates/deletes test contacts)
+task bench      # Benchmark commands (requires gdate from coreutils)
 task lint       # shellcheck + shfmt on shell scripts, biome on cx.js
 task fmt        # shfmt + biome --fix
 task install    # Symlink cx to ~/.local/bin
@@ -29,7 +31,7 @@ task uninstall  # Remove symlink
 cx list [--group <name>]
 cx search <query>
 cx get <id>
-cx create --first <name> --last <name> [--email label:addr] [--phone label:num] [--note text] ...
+cx create --first <name> --last <name> [--email label:addr] [--phone label:num] [--note text] [--group <name>] ...
 cx create --json                        # reads JSON from stdin
 cx update <id> [--note text] ...
 cx update <id> --json                   # reads JSON from stdin
