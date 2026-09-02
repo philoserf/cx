@@ -34,6 +34,35 @@ function exitWithError(message, code) {
 
 // --- Contacts.app helpers ---
 
+// Every mutation ends in a save, and a failed save loses the whole change.
+// Report that as such rather than as a raw JXA error.
+function saveOrFail(app) {
+	try {
+		app.save();
+	} catch (e) {
+		exitWithError(`changes may not have been saved: ${e.message}`, 1);
+	}
+}
+
+// Nothing that can fail may run after app.people.push, or a partly-built
+// contact is left in the store with no save to complete it. Parsing here is
+// cheap and pure, so the later real parse just repeats it.
+function validateFields(flags) {
+	if (flags.birthday !== undefined) parseDateFlag(flags.birthday, "birthday");
+	if (flags.date) {
+		for (let i = 0; i < flags.date.length; i++) {
+			const dt = parseLabelValue(flags.date[i], "anniversary");
+			parseDateFlag(dt.value, "date");
+		}
+	}
+}
+
+function resolveGroup(app, name) {
+	const groups = app.groups.whose({ name: name })();
+	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
+	return groups[0];
+}
+
 // Application() is lazy: it builds a proxy without contacting Contacts, so a
 // permission denial never surfaced in the try/catch that used to be here.
 // Force one cheap real access instead, so a TCC refusal is caught where it
@@ -574,6 +603,9 @@ function cmdCreate(args) {
 		exitWithError("create requires at least --first or --last", 1);
 	}
 
+	validateFields(flags);
+	const targetGroup = flags.group ? resolveGroup(app, flags.group) : null;
+
 	const personProps = {};
 	if (flags.first) personProps.firstName = flags.first;
 	if (flags.last) personProps.lastName = flags.last;
@@ -608,14 +640,9 @@ function cmdCreate(args) {
 		addMultiValueFields(app, person, flags);
 	}
 
-	if (flags.group) {
-		const groups = app.groups.whose({ name: flags.group })();
-		if (groups.length === 0)
-			exitWithError(`group not found: ${flags.group}`, 3);
-		app.add(person, { to: groups[0] });
-	}
+	if (targetGroup) app.add(person, { to: targetGroup });
 
-	app.save();
+	saveOrFail(app);
 	writeStdout(
 		"Created " +
 			(person.name() || "(no name)") +
@@ -649,13 +676,14 @@ function cmdUpdate(args) {
 		flags.json = true;
 	}
 
+	validateFields(flags);
 	applyScalarFields(person, flags);
 
 	if (!flags.json) {
 		addMultiValueFields(app, person, flags);
 	}
 
-	app.save();
+	saveOrFail(app);
 	writeStdout(
 		"Updated " +
 			(person.name() || "(no name)") +
@@ -684,7 +712,7 @@ function cmdDelete(args) {
 	}
 
 	app.delete(person);
-	app.save();
+	saveOrFail(app);
 	writeStdout(`Deleted ${name} (${sid})`);
 }
 function cmdGroups(args) {
@@ -753,7 +781,7 @@ function groupsAdd(app, contactId, groupName) {
 	if (groups.length === 0) exitWithError(`group not found: ${groupName}`, 3);
 
 	app.add(person, { to: groups[0] });
-	app.save();
+	saveOrFail(app);
 	writeStdout(`Added ${person.name() || "(no name)"} to ${groupName}`);
 }
 
@@ -763,7 +791,7 @@ function groupsRemove(app, contactId, groupName) {
 	if (groups.length === 0) exitWithError(`group not found: ${groupName}`, 3);
 
 	app.remove(person, { from: groups[0] });
-	app.save();
+	saveOrFail(app);
 	writeStdout(`Removed ${person.name() || "(no name)"} from ${groupName}`);
 }
 
@@ -773,7 +801,7 @@ function groupsCreate(app, name) {
 
 	const group = app.Group({ name: name });
 	app.groups.push(group);
-	app.save();
+	saveOrFail(app);
 	writeStdout(`Created group: ${name}`);
 }
 
@@ -790,7 +818,7 @@ function groupsDelete(app, name, flags) {
 	}
 
 	app.delete(groups[0]);
-	app.save();
+	saveOrFail(app);
 	writeStdout(`Deleted group: ${name}`);
 }
 

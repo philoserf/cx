@@ -241,6 +241,21 @@ assert_contains "2000-01-02" "$output"
 assert_exit 1 "$CX" create --first "${DATE_PREFIX}bad" --birthday "14 May 1990"
 assert_exit 1 "$CX" create --first "${DATE_PREFIX}bad" --birthday "2026-02-30"
 
+# --- Test: create validation ---
+# cmdCreate used to push the person into the store before resolving the group
+# or parsing dates, so a failure left a half-built contact behind.
+echo ""
+echo "=== Create (validation) ==="
+VAL_PREFIX="${TEST_PREFIX}V"
+
+assert_exit 3 "$CX" create --first "${VAL_PREFIX}" --last "Person" --group "NoSuchGroup_${TEST_PREFIX}"
+output=$("$CX" search "${VAL_PREFIX}" 2>&1)
+assert_not_contains "${VAL_PREFIX}" "$output"
+
+assert_exit 1 "$CX" create --first "${VAL_PREFIX}" --last "Person" --birthday "not-a-date"
+output=$("$CX" search "${VAL_PREFIX}" 2>&1)
+assert_not_contains "${VAL_PREFIX}" "$output"
+
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
 # holds for any non-trivial address book. Exit 3 here would mean the prefix
