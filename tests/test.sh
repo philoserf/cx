@@ -208,10 +208,9 @@ CREATED_IDS+=("$FLAG_ID")
 output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
 assert_contains "${FLAG_PREFIX}" "$output"
 
-# Characterization: --group is DROPPED in JSON mode. cmdCreate replaces the
-# parsed flags with the JSON payload (cx.js:480) before reading flags.group
-# (cx.js:531), so the flag never survives. Commit D1 fixes this — invert this
-# assertion then.
+# --group survives JSON mode as of D1. It used to be dropped: cmdCreate
+# replaced the parsed flags with the JSON payload before reading flags.group,
+# so the flag the user typed was gone by the time it was read.
 JGROUP_PREFIX="${TEST_PREFIX}JG"
 output=$(printf '{"firstName":"%s","lastName":"Person"}' "$JGROUP_PREFIX" | "$CX" create --json --group "$CGROUP_NAME" 2>&1)
 echo "$output"
@@ -219,7 +218,7 @@ JGROUP_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
 CREATED_IDS+=("$JGROUP_ID")
 
 output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
-assert_not_contains "${JGROUP_PREFIX}" "$output"
+assert_contains "${JGROUP_PREFIX}" "$output"
 
 # --- Test: dates ---
 # Regression for the timezone defect: a birthday entered as 1990-05-14 was
@@ -255,6 +254,21 @@ assert_not_contains "${VAL_PREFIX}" "$output"
 assert_exit 1 "$CX" create --first "${VAL_PREFIX}" --last "Person" --birthday "not-a-date"
 output=$("$CX" search "${VAL_PREFIX}" 2>&1)
 assert_not_contains "${VAL_PREFIX}" "$output"
+
+# --- Test: flag before positional ---
+# `cx delete --force <id>` used to read --force as the contact ID and exit 3.
+echo ""
+echo "=== Flag before positional ==="
+ORDER_PREFIX="${TEST_PREFIX}O"
+output=$("$CX" create --first "${ORDER_PREFIX}" --last "Person" 2>&1)
+ORDER_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$ORDER_ID")
+
+"$CX" delete --force "$ORDER_ID"
+# Left in CREATED_IDS deliberately: cleanup tolerates an already-deleted ID,
+# and removing an element from a bash array is not worth the noise.
+output=$("$CX" search "${ORDER_PREFIX}" 2>&1)
+assert_not_contains "${ORDER_PREFIX}" "$output"
 
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which

@@ -353,30 +353,87 @@ function getArgs() {
 	return args;
 }
 
-function parseFlags(args, startIndex) {
+const REPEATABLE = ["email", "phone", "url", "related", "date"];
+
+// JSON input uses Contacts' own property names; flag input uses short forms.
+const JSON_KEY_ALIASES = {
+	firstName: "first",
+	lastName: "last",
+	middleName: "middle",
+	nameSuffix: "suffix",
+	organization: "org",
+	jobTitle: "title",
+	department: "dept",
+};
+
+// Returns the flags and the leftover positional arguments, so no command has
+// to reach into args by index and a flag may appear anywhere. Before this,
+// `cx delete --force <id>` treated --force as the contact ID and reported a
+// missing contact.
+function parseArgs(args, startIndex) {
 	const flags = {};
-	const repeatable = ["email", "phone", "url", "related", "date"];
+	const positionals = [];
 	for (let i = startIndex; i < args.length; i++) {
-		if (args[i].indexOf("--") === 0) {
-			const key = args[i].substring(2);
-			if (key === "force") {
-				flags.force = true;
-			} else if (key === "json") {
-				flags.json = true;
-			} else if (i + 1 < args.length) {
-				i++;
-				if (repeatable.indexOf(key) !== -1) {
-					if (!flags[key]) flags[key] = [];
-					flags[key].push(args[i]);
-				} else {
-					flags[key] = args[i];
-				}
+		if (args[i].indexOf("--") !== 0) {
+			positionals.push(args[i]);
+			continue;
+		}
+		const key = args[i].substring(2);
+		if (key === "force") {
+			flags.force = true;
+		} else if (key === "json") {
+			flags.json = true;
+		} else if (i + 1 < args.length) {
+			i++;
+			if (REPEATABLE.indexOf(key) !== -1) {
+				if (!flags[key]) flags[key] = [];
+				flags[key].push(args[i]);
 			} else {
-				exitWithError(`flag --${key} requires a value`, 1);
+				flags[key] = args[i];
 			}
+		} else {
+			exitWithError(`flag --${key} requires a value`, 1);
 		}
 	}
-	return flags;
+	return { flags: flags, positionals: positionals };
+}
+
+// Both input modes normalise into one flag-space object, and the mode travels
+// beside the fields rather than inside them. Carrying it inside is what made
+// --group vanish in JSON mode: cmdCreate replaced the whole flags object with
+// the payload, so the flag the user typed was gone by the time it was read.
+function readInput(args, startIndex) {
+	const parsed = parseArgs(args, startIndex);
+	if (!parsed.flags.json) {
+		return {
+			source: "flags",
+			fields: parsed.flags,
+			positionals: parsed.positionals,
+		};
+	}
+
+	const stdin = readStdin().trim();
+	if (!stdin) exitWithError("--json requires JSON on stdin", 1);
+	let payload;
+	try {
+		payload = JSON.parse(stdin);
+	} catch (e) {
+		exitWithError(`invalid JSON: ${e.message}`, 1);
+	}
+
+	// Flags given alongside --json still apply; JSON wins on conflict.
+	const fields = {};
+	const flagKeys = Object.keys(parsed.flags);
+	for (let i = 0; i < flagKeys.length; i++) {
+		if (flagKeys[i] !== "json") fields[flagKeys[i]] = parsed.flags[flagKeys[i]];
+	}
+	const payloadKeys = Object.keys(payload);
+	for (let j = 0; j < payloadKeys.length; j++) {
+		const key = payloadKeys[j];
+		fields[JSON_KEY_ALIASES[key] || key] = payload[key];
+	}
+
+	return { source: "json", fields: fields, positionals: parsed.positionals };
 }
 
 // --- Usage ---
@@ -486,6 +543,31 @@ function applyScalarFields(person, flags) {
 	}
 }
 
+// JSON supplies emails and phones as {label, value} objects where flag input
+// supplies "label:value" strings. Only JSON produces these keys.
+function addObjectCollections(app, person, fields) {
+	if (fields.emails) {
+		for (let i = 0; i < fields.emails.length; i++) {
+			person.emails.push(
+				app.Email({
+					label: fields.emails[i].label || "home",
+					value: fields.emails[i].value,
+				}),
+			);
+		}
+	}
+	if (fields.phones) {
+		for (let j = 0; j < fields.phones.length; j++) {
+			person.phones.push(
+				app.Phone({
+					label: fields.phones[j].label || "home",
+					value: fields.phones[j].value,
+				}),
+			);
+		}
+	}
+}
+
 function addMultiValueFields(app, person, flags) {
 	if (flags.email) {
 		for (let i = 0; i < flags.email.length; i++) {
@@ -529,7 +611,7 @@ function addMultiValueFields(app, person, flags) {
 // --- Commands ---
 
 function cmdList(args) {
-	const flags = parseFlags(args, 1);
+	const flags = parseArgs(args, 1).flags;
 	const app = getApp();
 
 	let collection;
@@ -549,8 +631,9 @@ function cmdList(args) {
 	writeStdout(formatTable(summaries));
 }
 function cmdSearch(args) {
-	if (args.length < 2) exitWithError("usage: cx search <query>", 1);
-	const query = args[1];
+	const positionals = parseArgs(args, 1).positionals;
+	if (positionals.length === 0) exitWithError("usage: cx search <query>", 1);
+	const query = positionals[0];
 	const app = getApp();
 
 	const people = app.people.whose({
@@ -572,73 +655,33 @@ function cmdSearch(args) {
 	writeStdout(formatTable(summaries));
 }
 function cmdGet(args) {
-	if (args.length < 2) exitWithError("usage: cx get <id>", 1);
+	const positionals = parseArgs(args, 1).positionals;
+	if (positionals.length === 0) exitWithError("usage: cx get <id>", 1);
 	const app = getApp();
-	const person = resolveId(app, args[1]);
+	const person = resolveId(app, positionals[0]);
 	writeStdout(formatCard(person));
 }
 function cmdCreate(args) {
-	let flags = parseFlags(args, 1);
-	const app = getApp();
+	const fields = readInput(args, 1).fields;
 
-	if (flags.json) {
-		const input = readStdin().trim();
-		if (!input) exitWithError("--json requires JSON on stdin", 1);
-		try {
-			flags = JSON.parse(input);
-		} catch (e) {
-			exitWithError(`invalid JSON: ${e.message}`, 1);
-		}
-		if (flags.firstName !== undefined) flags.first = flags.firstName;
-		if (flags.lastName !== undefined) flags.last = flags.lastName;
-		if (flags.middleName !== undefined) flags.middle = flags.middleName;
-		if (flags.nameSuffix !== undefined) flags.suffix = flags.nameSuffix;
-		if (flags.organization !== undefined) flags.org = flags.organization;
-		if (flags.jobTitle !== undefined) flags.title = flags.jobTitle;
-		if (flags.department !== undefined) flags.dept = flags.department;
-		flags.json = true;
-	}
-
-	if (!flags.first && !flags.last) {
+	if (!fields.first && !fields.last) {
 		exitWithError("create requires at least --first or --last", 1);
 	}
 
-	validateFields(flags);
-	const targetGroup = flags.group ? resolveGroup(app, flags.group) : null;
+	const app = getApp();
+	validateFields(fields);
+	const targetGroup = fields.group ? resolveGroup(app, fields.group) : null;
 
 	const personProps = {};
-	if (flags.first) personProps.firstName = flags.first;
-	if (flags.last) personProps.lastName = flags.last;
+	if (fields.first) personProps.firstName = fields.first;
+	if (fields.last) personProps.lastName = fields.last;
 
 	const person = app.Person(personProps);
 	app.people.push(person);
 
-	applyScalarFields(person, flags);
-
-	if (flags.json && !Array.isArray(flags.email)) {
-		if (flags.emails) {
-			for (let i = 0; i < flags.emails.length; i++) {
-				person.emails.push(
-					app.Email({
-						label: flags.emails[i].label || "home",
-						value: flags.emails[i].value,
-					}),
-				);
-			}
-		}
-		if (flags.phones) {
-			for (let j = 0; j < flags.phones.length; j++) {
-				person.phones.push(
-					app.Phone({
-						label: flags.phones[j].label || "home",
-						value: flags.phones[j].value,
-					}),
-				);
-			}
-		}
-	} else {
-		addMultiValueFields(app, person, flags);
-	}
+	applyScalarFields(person, fields);
+	addMultiValueFields(app, person, fields);
+	addObjectCollections(app, person, fields);
 
 	if (targetGroup) app.add(person, { to: targetGroup });
 
@@ -652,35 +695,20 @@ function cmdCreate(args) {
 	);
 }
 function cmdUpdate(args) {
-	if (args.length < 2)
+	const input = readInput(args, 1);
+	if (input.positionals.length === 0) {
 		exitWithError("usage: cx update <id> [--field value ...]", 1);
-	const app = getApp();
-	const person = resolveId(app, args[1]);
-	let flags = parseFlags(args, 2);
-
-	if (flags.json) {
-		const input = readStdin().trim();
-		if (!input) exitWithError("--json requires JSON on stdin", 1);
-		try {
-			flags = JSON.parse(input);
-		} catch (e) {
-			exitWithError(`invalid JSON: ${e.message}`, 1);
-		}
-		if (flags.firstName !== undefined) flags.first = flags.firstName;
-		if (flags.lastName !== undefined) flags.last = flags.lastName;
-		if (flags.middleName !== undefined) flags.middle = flags.middleName;
-		if (flags.nameSuffix !== undefined) flags.suffix = flags.nameSuffix;
-		if (flags.organization !== undefined) flags.org = flags.organization;
-		if (flags.jobTitle !== undefined) flags.title = flags.jobTitle;
-		if (flags.department !== undefined) flags.dept = flags.department;
-		flags.json = true;
 	}
+	const app = getApp();
+	const person = resolveId(app, input.positionals[0]);
+	const fields = input.fields;
 
-	validateFields(flags);
-	applyScalarFields(person, flags);
+	validateFields(fields);
+	applyScalarFields(person, fields);
 
-	if (!flags.json) {
-		addMultiValueFields(app, person, flags);
+	// JSON update still cannot add multi-values. E3 gives it replace semantics.
+	if (input.source === "flags") {
+		addMultiValueFields(app, person, fields);
 	}
 
 	saveOrFail(app);
@@ -693,10 +721,13 @@ function cmdUpdate(args) {
 	);
 }
 function cmdDelete(args) {
-	if (args.length < 2) exitWithError("usage: cx delete <id> [--force]", 1);
+	const parsed = parseArgs(args, 1);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx delete <id> [--force]", 1);
+	}
 	const app = getApp();
-	const person = resolveId(app, args[1]);
-	const flags = parseFlags(args, 2);
+	const person = resolveId(app, parsed.positionals[0]);
+	const flags = parsed.flags;
 	const name = person.name() || "(no name)";
 	const sid = shortId(person.id());
 
@@ -716,8 +747,12 @@ function cmdDelete(args) {
 	writeStdout(`Deleted ${name} (${sid})`);
 }
 function cmdGroups(args) {
-	if (args.length < 2) exitWithError("usage: cx groups <subcommand> [args]", 1);
-	const sub = args[1];
+	const parsed = parseArgs(args, 1);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx groups <subcommand> [args]", 1);
+	}
+	const sub = parsed.positionals[0];
+	const rest = parsed.positionals.slice(1);
 	const app = getApp();
 
 	switch (sub) {
@@ -725,27 +760,27 @@ function cmdGroups(args) {
 			groupsList(app);
 			break;
 		case "members":
-			if (args.length < 3) exitWithError("usage: cx groups members <name>", 1);
-			groupsMembers(app, args[2]);
+			if (rest.length < 1) exitWithError("usage: cx groups members <name>", 1);
+			groupsMembers(app, rest[0]);
 			break;
 		case "add":
-			if (args.length < 4)
+			if (rest.length < 2)
 				exitWithError("usage: cx groups add <contact-id> <group-name>", 1);
-			groupsAdd(app, args[2], args[3]);
+			groupsAdd(app, rest[0], rest[1]);
 			break;
 		case "remove":
-			if (args.length < 4)
+			if (rest.length < 2)
 				exitWithError("usage: cx groups remove <contact-id> <group-name>", 1);
-			groupsRemove(app, args[2], args[3]);
+			groupsRemove(app, rest[0], rest[1]);
 			break;
 		case "create":
-			if (args.length < 3) exitWithError("usage: cx groups create <name>", 1);
-			groupsCreate(app, args[2]);
+			if (rest.length < 1) exitWithError("usage: cx groups create <name>", 1);
+			groupsCreate(app, rest[0]);
 			break;
 		case "delete":
-			if (args.length < 3)
+			if (rest.length < 1)
 				exitWithError("usage: cx groups delete <name> [--force]", 1);
-			groupsDelete(app, args[2], parseFlags(args, 3));
+			groupsDelete(app, rest[0], parsed.flags);
 			break;
 		default:
 			exitWithError(`unknown groups subcommand: ${sub}`, 1);
