@@ -788,8 +788,8 @@ function cmdGet(args) {
 function cmdCreate(args) {
 	const fields = readInput(args, 1).fields;
 
-	if (!fields.first && !fields.last) {
-		exitWithError("create requires at least --first or --last", 1);
+	if (!fields.first && !fields.last && !fields.org) {
+		exitWithError("create requires at least --first, --last or --org", 1);
 	}
 
 	const app = getApp();
@@ -799,6 +799,9 @@ function cmdCreate(args) {
 	const personProps = {};
 	if (fields.first) personProps.firstName = fields.first;
 	if (fields.last) personProps.lastName = fields.last;
+	// Contacts models a business as a person record flagged as a company,
+	// displayed by organization rather than by name.
+	if (!fields.first && !fields.last) personProps.company = true;
 
 	const person = app.Person(personProps);
 	app.people.push(person);

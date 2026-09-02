@@ -333,6 +333,22 @@ assert_not_contains "${REP_PREFIX}c@example.com" "$output"
 
 assert_exit 1 "$CX" update "$REP_ID" --replace bogusfield
 
+# --- Test: company contact ---
+# Contacts models a business as a company-flagged record with no personal
+# name. create used to reject it for having neither --first nor --last.
+echo ""
+echo "=== Company contact ==="
+ORG_PREFIX="${TEST_PREFIX}Co"
+output=$("$CX" create --org "${ORG_PREFIX} Industries" --phone "work:555-0188" 2>&1)
+echo "$output"
+assert_contains "Created" "$output"
+ORG_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$ORG_ID")
+
+output=$("$CX" get "$ORG_ID" 2>&1)
+assert_contains "${ORG_PREFIX} Industries" "$output"
+assert_contains "555-0188" "$output"
+
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
 # holds for any non-trivial address book. Exit 3 here would mean the prefix
