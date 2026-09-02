@@ -1,7 +1,7 @@
 version: "3"
 
 vars:
-  SHELL_FILES: cx tests/test.sh
+  SHELL_FILES: cx tests/test.sh tests/bench.sh
   INSTALL_DIR: "{{.HOME}}/.local/bin"
 
 tasks:
@@ -19,8 +19,11 @@ tasks:
       - rm -f {{.INSTALL_DIR}}/cx
 
   test:
-    desc: Run integration tests
+    desc: Run selftest and integration tests
     cmds:
+      # Pure-function checks first: they need no permission and no contacts,
+      # so a logic regression fails in milliseconds rather than minutes.
+      - ./cx selftest
       - bash tests/test.sh
 
   bench:

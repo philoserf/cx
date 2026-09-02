@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # The integration tests need macOS, Contacts.app and a granted automation
+      # permission, so they cannot run here. Everything task lint does can.
+      - name: Install shfmt and task
+        run: |
+          go install mvdan.cc/sh/v3/cmd/shfmt@latest
+          go install github.com/go-task/task/v3/cmd/task@latest
+          echo "$HOME/go/bin" >>"$GITHUB_PATH"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Lint
+        run: task lint

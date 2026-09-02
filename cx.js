@@ -1,4 +1,5 @@
 ObjC.import("Foundation");
+ObjC.import("stdlib");
 
 // --- Stderr / Stdout helpers ---
 
@@ -28,46 +29,173 @@ function readStdin() {
 
 function exitWithError(message, code) {
 	writeStderr(`error: ${message}`);
-	ObjC.import("stdlib");
 	$.exit(code || 1);
+}
+
+// The two-step --force protocol: print what would be destroyed, exit 5, and
+// let the caller decide. Not an error, so it does not go through stderr.
+function exitAwaitingConfirmation(format) {
+	if (format !== "json") writeStdout("\nRe-run with --force to confirm.");
+	$.exit(5);
 }
 
 // --- Contacts.app helpers ---
 
-function getApp() {
+// Every mutation ends in a save, and a failed save loses the whole change.
+// Report that as such rather than as a raw JXA error.
+function saveOrFail(app) {
 	try {
-		return Application("Contacts");
-	} catch (_e) {
-		exitWithError(
-			"cannot access Contacts.app — grant access in System Settings > Privacy & Security > Automation",
-			2,
-		);
+		app.save();
+	} catch (e) {
+		exitWithError(`changes may not have been saved: ${e.message}`, 1);
 	}
 }
 
+// Nothing that can fail may run after app.people.push, or a partly-built
+// contact is left in the store with no save to complete it. Parsing here is
+// cheap and pure, so the later real parse just repeats it.
+function validateFields(fields) {
+	for (let h = 0; h < SCALARS.length; h++) {
+		const spec = SCALARS[h];
+		if (spec.type !== "date" || !spec.flag) continue;
+		if (fields[spec.flag] !== undefined) {
+			parseDateFlag(fields[spec.flag], spec.flag);
+		}
+	}
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (spec.type !== "date" || !spec.flag || !fields[spec.flag]) continue;
+		const values = fields[spec.flag];
+		for (let j = 0; j < values.length; j++) {
+			parseDateFlag(
+				parseLabelValue(values[j], spec.defaultLabel).value,
+				spec.flag,
+			);
+		}
+	}
+}
+
+function findGroup(app, name) {
+	const groups = app.groups.whose({ name: name })();
+	return groups.length > 0 ? groups[0] : null;
+}
+
+function resolveGroup(app, name) {
+	const group = findGroup(app, name);
+	if (!group) exitWithError(`group not found: ${name}`, 3);
+	return group;
+}
+
+// One place decides between rendering and serialising, so --format json is a
+// serialiser rather than a second renderer. Every command emits the same
+// records its formatters consume.
+function outputFormat(flags) {
+	const format = flags.format || "text";
+	if (format !== "text" && format !== "json") {
+		exitWithError(`--format expects text or json, got: ${format}`, 1);
+	}
+	return format;
+}
+
+// Write commands report what they did. In text that is one line; in JSON it
+// is the same facts a caller would otherwise parse back out of that line.
+function emitAction(format, action, person) {
+	const name = person.name() || "(no name)";
+	const id = person.id();
+	const verb = action === "created" ? "Created" : "Updated";
+	emit(
+		format,
+		{ action: action, id: id, shortId: shortId(id), name: name },
+		() => `${verb} ${name} (${shortId(id)})`,
+	);
+}
+
+function emit(format, data, renderText) {
+	writeStdout(format === "json" ? JSON.stringify(data, null, 2) : renderText());
+}
+
+// Every list of contacts is sorted by display name before rendering.
+function printSummaries(summaries, format) {
+	summaries.sort((a, b) => a.name.localeCompare(b.name));
+	emit(format, summaries, () => formatTable(summaries));
+}
+
+// Application() is lazy: it builds a proxy without contacting Contacts, so a
+// permission denial never surfaced in the try/catch that used to be here.
+// Force one cheap real access instead, so a TCC refusal is caught where it
+// actually happens and reported as exit 2 with the message written for it,
+// rather than as a raw JXA error on whatever the command touched first.
+function getApp() {
+	const app = Application("Contacts");
+	try {
+		app.name();
+	} catch (e) {
+		if (isPermissionError(e)) {
+			exitWithError(
+				"cannot access Contacts.app — grant access in System Settings > Privacy & Security > Automation",
+				2,
+			);
+		}
+		throw e;
+	}
+	return app;
+}
+
+function isPermissionError(e) {
+	if (e.errorNumber === -1743 || e.errorNumber === -10004) return true;
+	return /not authori[sz]ed|not permitted|-1743/i.test(String(e.message || ""));
+}
+
 function shortId(fullId) {
-	return fullId.substring(0, 8);
+	return String(fullId).substring(0, 8);
+}
+
+// Contacts stores a birthday as a date-only value at noon local time. Parsing
+// "1990-05-14" with new Date() gives UTC midnight, which is the previous day
+// in any negative UTC offset, and Contacts then records May 13. Building from
+// local components at noon avoids that, and avoids the timezones that skip
+// midnight entirely on a DST transition.
+function parseDateFlag(str, flagName) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+	if (!m) {
+		exitWithError(`--${flagName} must be YYYY-MM-DD, got: ${str}`, 1);
+	}
+	const year = Number(m[1]);
+	const month = Number(m[2]);
+	const day = Number(m[3]);
+	const date = new Date(year, month - 1, day, 12, 0, 0);
+	if (
+		date.getFullYear() !== year ||
+		date.getMonth() !== month - 1 ||
+		date.getDate() !== day
+	) {
+		exitWithError(`--${flagName} is not a real date: ${str}`, 1);
+	}
+	return date;
+}
+
+function formatDate(date) {
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	return `${date.getFullYear()}-${month}-${day}`;
+}
+
+// Custom dates come back as Date objects; every other multi-value is a string.
+function formatValue(value) {
+	return value && typeof value.getFullYear === "function"
+		? formatDate(value)
+		: value;
 }
 
 function resolveId(app, idArg) {
 	if (!idArg) exitWithError("missing contact ID", 1);
 
-	// Try full ID first
-	try {
-		const p = app.people.byId(idArg);
-		p.name(); // force evaluation — throws if not found
-		return p;
-	} catch (_e) {
-		// Not a full ID — try short ID match
-	}
-
-	const allPeople = app.people();
-	const matches = [];
-	for (let i = 0; i < allPeople.length; i++) {
-		if (allPeople[i].id().indexOf(idArg) === 0) {
-			matches.push(allPeople[i]);
-		}
-	}
+	// One server-side prefix query handles both forms — a full UUID:ABPerson
+	// id is a prefix of itself — in a single Apple Event. The previous
+	// implementation fetched every person and called id() on each, which is
+	// one round trip per contact and the reason get/update/delete and
+	// groups add/remove all cost ~10s.
+	const matches = app.people.whose({ id: { _beginsWith: idArg } })();
 
 	if (matches.length === 0) {
 		exitWithError(`no contact matching ID ${idArg}`, 3);
@@ -82,7 +210,7 @@ function resolveId(app, idArg) {
 	return matches[0];
 }
 
-function contactSummary(person) {
+function readSummary(person) {
 	const name = person.name() || "(no name)";
 	let email = "";
 	let phone = "";
@@ -104,126 +232,206 @@ function contactSummary(person) {
 	};
 }
 
+// One Apple Event per property for a whole collection, instead of one per
+// contact per property. Measured at 341 contacts: five plural calls total
+// ~0.7s, against ~48s for the equivalent per-contact loop.
+//
+// Only valid on an element collection — app.people, or a group's people.
+// Plural access on a whose() specifier measured 13.3s for 256 names, worse
+// than the loop, so cmdSearch keeps readSummary.
+function readSummaries(collection) {
+	const ids = collection.id();
+	const names = collection.name();
+	const orgs = collection.organization();
+	const emails = collection.emails.value();
+	const phones = collection.phones.value();
+
+	// Separate events, paired by index. If Contacts ever returned arrays of
+	// different lengths, pairing them would attribute one person's email to
+	// another, so refuse rather than guess.
+	if (
+		names.length !== ids.length ||
+		orgs.length !== ids.length ||
+		emails.length !== ids.length ||
+		phones.length !== ids.length
+	) {
+		exitWithError("Contacts returned mismatched property arrays", 1);
+	}
+
+	const summaries = [];
+	for (let i = 0; i < ids.length; i++) {
+		summaries.push({
+			id: ids[i],
+			shortId: shortId(ids[i]),
+			name: names[i] || "(no name)",
+			email: emails[i] && emails[i].length > 0 ? emails[i][0] : "",
+			phone: phones[i] && phones[i].length > 0 ? phones[i][0] : "",
+			organization: orgs[i] || "",
+		});
+	}
+	return summaries;
+}
+
 function formatTable(summaries) {
 	if (summaries.length === 0) return "(no contacts)";
 
+	// Widths follow the data rather than being fixed at 10/30/30/18, so a long
+	// email is no longer cut without a trace. Capped so one outlier cannot push
+	// the table off the far side of a terminal. The last column is unpadded and
+	// uncapped, as it always was.
+	const columns = [
+		{ header: "ID", key: "shortId", max: 10 },
+		{ header: "Name", key: "name", max: 34 },
+		{ header: "Email", key: "email", max: 36 },
+		{ header: "Phone", key: "phone", max: 20 },
+		{ header: "Organization", key: "organization" },
+	];
+
+	for (let c = 0; c < columns.length - 1; c++) {
+		let width = columns[c].header.length;
+		for (let i = 0; i < summaries.length; i++) {
+			const value = summaries[i][columns[c].key] || "";
+			if (value.length > width) width = value.length;
+		}
+		columns[c].width = Math.min(width, columns[c].max) + 2;
+	}
+
+	const row = (values) => {
+		let line = "";
+		for (let c = 0; c < columns.length - 1; c++) {
+			line += fit(values[c], columns[c].width);
+		}
+		return line + values[columns.length - 1];
+	};
+
 	const lines = [];
-	const header =
-		padRight("ID", 10) +
-		padRight("Name", 30) +
-		padRight("Email", 30) +
-		padRight("Phone", 18) +
-		"Organization";
+	const header = row(columns.map((col) => col.header));
 	lines.push(header);
 	lines.push("-".repeat(header.length));
 
 	for (let i = 0; i < summaries.length; i++) {
 		const s = summaries[i];
-		lines.push(
-			padRight(s.shortId, 10) +
-				padRight(s.name, 30) +
-				padRight(s.email, 30) +
-				padRight(s.phone, 18) +
-				s.organization,
-		);
+		lines.push(row(columns.map((col) => s[col.key] || "")));
 	}
 	return lines.join("\n");
 }
 
 function padRight(str, len) {
-	if (str.length >= len) return `${str.substring(0, len - 1)} `;
-	return str + " ".repeat(len - str.length);
+	return str.length >= len ? str : str + " ".repeat(len - str.length);
 }
 
-function formatCard(person) {
-	const lines = [];
-	const id = person.id();
+// Pads to a column width, or truncates to it keeping one space as a gutter.
+// Character counts assume one column per UTF-16 unit, so CJK and emoji names
+// misalign; that is accepted for a personal tool rather than fixed.
+function fit(str, len) {
+	return str.length >= len
+		? `${str.substring(0, len - 1)} `
+		: padRight(str, len);
+}
 
-	lines.push(`ID:           ${shortId(id)} (${id})`);
+// Contacts wraps its built-in labels as _$!<Mobile>!$_. A label the user
+// typed passes through unchanged.
+function unwrapLabel(label) {
+	const m = /^_\$!<(.*)>!\$_$/.exec(label);
+	return m ? m[1] : label;
+}
 
-	const nameFields = [
-		["Name", person.name()],
-		["First", person.firstName()],
-		["Last", person.lastName()],
-		["Middle", person.middleName()],
-		[
-			"Prefix",
-			(() => {
-				try {
-					return person.namePrefix();
-				} catch (_e) {
-					return null;
-				}
-			})(),
-		],
-		["Suffix", person.suffix()],
-		["Nickname", person.nickname()],
-		["Maiden", person.maidenName()],
-	];
-	for (let i = 0; i < nameFields.length; i++) {
-		if (nameFields[i][1])
-			lines.push(padRight(`${nameFields[i][0]}:`, 14) + nameFields[i][1]);
+// Reading and rendering are separate: readCard turns a live Contacts object
+// into a plain record, formatCard turns that record into text. Nothing below
+// this line touches a JXA object, which is what makes the card renderable
+// without Contacts.app — and serialisable, when --format json arrives.
+function readCard(person) {
+	const fields = {};
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		let value;
+		if (spec.guarded) {
+			try {
+				value = person[spec.prop]();
+			} catch (_e) {
+				value = null;
+			}
+		} else {
+			value = person[spec.prop]();
+		}
+		fields[spec.prop] =
+			value && spec.type === "date" ? formatDate(value) : value;
 	}
 
-	const orgFields = [
-		["Organization", person.organization()],
-		["Job Title", person.jobTitle()],
-		["Department", person.department()],
-	];
-	for (let j = 0; j < orgFields.length; j++) {
-		if (orgFields[j][1])
-			lines.push(padRight(`${orgFields[j][0]}:`, 14) + orgFields[j][1]);
-	}
-
-	const birthday = person.birthDate();
-	if (birthday)
-		lines.push(`Birthday:     ${birthday.toISOString().substring(0, 10)}`);
-
-	const multiFields = [
-		["Email", person.emails()],
-		["Phone", person.phones()],
-		["URL", person.urls()],
-		["Related", person.relatedNames()],
-		["IM", person.instantMessages()],
-		["Date", person.customDates()],
-	];
-	for (let k = 0; k < multiFields.length; k++) {
-		const items = multiFields[k][1];
+	const multi = {};
+	for (let k = 0; k < MULTI.length; k++) {
+		const spec = MULTI[k];
+		const items = person[spec.coll]();
+		const list = [];
 		for (let m = 0; m < items.length; m++) {
-			const label = items[m].label() || multiFields[k][0];
-			lines.push(padRight(`${label}:`, 14) + items[m].value());
+			list.push({
+				label: unwrapLabel(items[m].label() || spec.display),
+				value: formatValue(items[m].value()),
+			});
+		}
+		multi[spec.coll] = list;
+	}
+
+	const addresses = [];
+	const rawAddresses = person.addresses();
+	for (let a = 0; a < rawAddresses.length; a++) {
+		addresses.push({
+			label: unwrapLabel(rawAddresses[a].label() || "Address"),
+			value: (rawAddresses[a].formattedAddress() || "").replace(/\n/g, ", "),
+		});
+	}
+
+	const socialProfiles = [];
+	const rawSocial = person.socialProfiles();
+	for (let sp = 0; sp < rawSocial.length; sp++) {
+		socialProfiles.push({
+			label: rawSocial[sp].serviceName() || "Social",
+			value: rawSocial[sp].userName() || rawSocial[sp].url() || "",
+		});
+	}
+
+	return {
+		id: person.id(),
+		fields: fields,
+		multi: multi,
+		addresses: addresses,
+		socialProfiles: socialProfiles,
+		groups: person.groups().map((g) => g.name()),
+	};
+}
+
+function formatCard(record) {
+	const lines = [];
+
+	lines.push(`ID:           ${shortId(record.id)} (${record.id})`);
+
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (!spec.display) continue;
+		const value = record.fields[spec.prop];
+		if (value) lines.push(padRight(`${spec.display}:`, 14) + value);
+	}
+
+	for (let k = 0; k < MULTI.length; k++) {
+		const items = record.multi[MULTI[k].coll];
+		for (let m = 0; m < items.length; m++) {
+			lines.push(padRight(`${items[m].label}:`, 14) + items[m].value);
 		}
 	}
 
-	const addresses = person.addresses();
-	for (let a = 0; a < addresses.length; a++) {
-		const addr = addresses[a];
-		const formatted = addr.formattedAddress();
-		const addrLabel = addr.label() || "Address";
-		lines.push(
-			padRight(`${addrLabel}:`, 14) + (formatted || "").replace(/\n/g, ", "),
-		);
+	const extras = record.addresses.concat(record.socialProfiles);
+	for (let e = 0; e < extras.length; e++) {
+		lines.push(padRight(`${extras[e].label}:`, 14) + extras[e].value);
 	}
 
-	const socialProfiles = person.socialProfiles();
-	for (let s = 0; s < socialProfiles.length; s++) {
-		const sp = socialProfiles[s];
-		const svc = sp.serviceName() || "Social";
-		const user = sp.userName() || sp.url() || "";
-		lines.push(padRight(`${svc}:`, 14) + user);
+	if (record.groups.length > 0) {
+		lines.push(`Groups:       ${record.groups.join(", ")}`);
 	}
 
-	const groups = person.groups();
-	if (groups.length > 0) {
-		const groupNames = groups.map((g) => g.name());
-		lines.push(`Groups:       ${groupNames.join(", ")}`);
-	}
-
-	const note = person.note();
-	if (note) {
+	if (record.fields.note) {
 		lines.push("");
 		lines.push("Note:");
-		lines.push(note);
+		lines.push(record.fields.note);
 	}
 
 	return lines.join("\n");
@@ -243,64 +451,363 @@ function getArgs() {
 	return args;
 }
 
-function parseFlags(args, startIndex) {
+// One row per single-valued field, in card order. flag is absent where cx can
+// render the field but not set it; display is absent where the field is
+// rendered somewhere other than the label column. json names the payload key
+// where it differs from the Contacts property name.
+const SCALARS = [
+	{ prop: "name", display: "Name" },
+	{ flag: "first", prop: "firstName", display: "First" },
+	{ flag: "last", prop: "lastName", display: "Last" },
+	{ flag: "middle", prop: "middleName", display: "Middle" },
+	// namePrefix throws -1700 on some contacts; the read stays guarded.
+	{ prop: "namePrefix", display: "Prefix", guarded: true },
+	{ flag: "suffix", prop: "suffix", json: "nameSuffix", display: "Suffix" },
+	{ flag: "nickname", prop: "nickname", display: "Nickname" },
+	{ flag: "maiden", prop: "maidenName", display: "Maiden" },
+	{ flag: "org", prop: "organization", display: "Organization" },
+	{ flag: "title", prop: "jobTitle", display: "Job Title" },
+	{ flag: "dept", prop: "department", display: "Department" },
+	{ flag: "birthday", prop: "birthDate", display: "Birthday", type: "date" },
+	// Handled by applyNote, not the generic setter — see there.
+	{ flag: "note", prop: "note", manual: true },
+];
+
+// One row per repeatable field, read by the parser, the writer, the JSON
+// collection writer and the renderer. Adding a field is one row; before this
+// it was four edits in four places, and missing one gave a field that parsed
+// but never rendered. Order here is the order they appear on a card.
+const MULTI = [
+	{
+		flag: "email",
+		json: "emails",
+		coll: "emails",
+		ctor: "Email",
+		defaultLabel: "home",
+		display: "Email",
+	},
+	{
+		flag: "phone",
+		json: "phones",
+		coll: "phones",
+		ctor: "Phone",
+		defaultLabel: "home",
+		display: "Phone",
+	},
+	{
+		flag: "url",
+		coll: "urls",
+		ctor: "Url",
+		defaultLabel: "home",
+		display: "URL",
+	},
+	{
+		flag: "related",
+		coll: "relatedNames",
+		ctor: "RelatedName",
+		defaultLabel: "friend",
+		display: "Related",
+	},
+	// No flag: Contacts holds instant messages, cx only renders them.
+	{ coll: "instantMessages", display: "IM" },
+	{
+		flag: "date",
+		coll: "customDates",
+		ctor: "CustomDate",
+		defaultLabel: "anniversary",
+		display: "Date",
+		type: "date",
+	},
+];
+
+function multiSpecForFlag(flag) {
+	for (let i = 0; i < MULTI.length; i++) {
+		if (MULTI[i].flag === flag) return MULTI[i];
+	}
+	return null;
+}
+
+// JSON input uses Contacts' own property names; flag input uses short forms.
+function jsonKeyToFlag(key) {
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (spec.flag && (key === spec.prop || key === spec.json)) return spec.flag;
+	}
+	return key;
+}
+
+// Returns the flags and the leftover positional arguments, so no command has
+// to reach into args by index and a flag may appear anywhere. Before this,
+// `cx delete --force <id>` treated --force as the contact ID and reported a
+// missing contact.
+function parseArgs(args, startIndex) {
 	const flags = {};
-	const repeatable = ["email", "phone", "url", "related", "date"];
+	const positionals = [];
 	for (let i = startIndex; i < args.length; i++) {
-		if (args[i].indexOf("--") === 0) {
-			const key = args[i].substring(2);
-			if (key === "force") {
-				flags.force = true;
-			} else if (key === "json") {
-				flags.json = true;
-			} else if (i + 1 < args.length) {
-				i++;
-				if (repeatable.indexOf(key) !== -1) {
-					if (!flags[key]) flags[key] = [];
-					flags[key].push(args[i]);
-				} else {
-					flags[key] = args[i];
-				}
+		if (args[i].indexOf("--") !== 0) {
+			positionals.push(args[i]);
+			continue;
+		}
+		const key = args[i].substring(2);
+		if (key === "force") {
+			flags.force = true;
+		} else if (key === "json") {
+			flags.json = true;
+		} else if (i + 1 < args.length) {
+			i++;
+			if (key === "replace" || multiSpecForFlag(key)) {
+				if (!flags[key]) flags[key] = [];
+				flags[key].push(args[i]);
 			} else {
-				exitWithError(`flag --${key} requires a value`, 1);
+				flags[key] = args[i];
 			}
+		} else {
+			exitWithError(`flag --${key} requires a value`, 1);
 		}
 	}
-	return flags;
+	return { flags: flags, positionals: positionals };
+}
+
+// Both input modes normalise into one flag-space object, and the mode travels
+// beside the fields rather than inside them. Carrying it inside is what made
+// --group vanish in JSON mode: cmdCreate replaced the whole flags object with
+// the payload, so the flag the user typed was gone by the time it was read.
+function readInput(args, startIndex) {
+	const parsed = parseArgs(args, startIndex);
+	if (!parsed.flags.json) {
+		return {
+			source: "flags",
+			fields: parsed.flags,
+			positionals: parsed.positionals,
+		};
+	}
+
+	const stdin = readStdin().trim();
+	if (!stdin) exitWithError("--json requires JSON on stdin", 1);
+	let payload;
+	try {
+		payload = JSON.parse(stdin);
+	} catch (e) {
+		exitWithError(`invalid JSON: ${e.message}`, 1);
+	}
+
+	// Flags given alongside --json still apply; JSON wins on conflict.
+	const fields = {};
+	const flagKeys = Object.keys(parsed.flags);
+	for (let i = 0; i < flagKeys.length; i++) {
+		if (flagKeys[i] !== "json") fields[flagKeys[i]] = parsed.flags[flagKeys[i]];
+	}
+	const payloadKeys = Object.keys(payload);
+	for (let j = 0; j < payloadKeys.length; j++) {
+		const key = payloadKeys[j];
+		fields[jsonKeyToFlag(key)] = payload[key];
+	}
+
+	return { source: "json", fields: fields, positionals: parsed.positionals };
 }
 
 // --- Usage ---
 
-const USAGE = [
-	"Usage: cx <command> [options]",
-	"",
-	"Commands:",
-	"  list [--group <name>]                    List contacts",
-	"  search <query>                           Search contacts",
-	"  get <id>                                 Show contact details",
-	"  create --first <n> --last <n> [opts]     Create contact",
-	"  update <id> [opts]                       Update contact",
-	"  delete <id> [--force]                    Delete contact",
-	"  groups list                              List groups",
-	"  groups members <name>                    List group members",
-	"  groups add <id> <group>                  Add contact to group",
-	"  groups remove <id> <group>               Remove contact from group",
-	"  groups create <name>                     Create group",
-	"  groups delete <name> [--force]           Delete group",
-	"",
-	"Multi-value flags (--email, --phone, --url, --related, --date):",
-	"  Repeat for multiple values. Use label:value syntax.",
-	"  Example: --email work:me@co.com --email home:me@home.com",
-	"",
-	"  --json    Read full contact JSON from stdin (create/update only)",
-].join("\n");
+const VERSION = "1.0.0";
+
+// The options sections are generated from the catalogues, so the help text
+// cannot drift from the parser. It used to say "[opts]" and stop, leaving
+// eight flags documented nowhere.
+function usage() {
+	const flagsOf = (table) => {
+		const names = [];
+		for (let i = 0; i < table.length; i++) {
+			if (table[i].flag) names.push(table[i].flag);
+		}
+		return names;
+	};
+	const scalars = flagsOf(SCALARS);
+	const multi = flagsOf(MULTI);
+
+	return [
+		"Usage: cx <command> [options]",
+		"",
+		"Commands:",
+		"  list [--group <name>]                    List contacts",
+		"  search <query>                           Search contacts",
+		"  get <id>                                 Show contact details",
+		"  create (--first|--last|--org) ... [opts] Create contact",
+		"  update <id> [opts]                       Update contact",
+		"  delete <id> [--force]                    Delete contact",
+		"  groups list                              List groups",
+		"  groups members <name>                    List group members",
+		"  groups add <id> <group>                  Add contact to group",
+		"  groups remove <id> <group>               Remove contact from group",
+		"  groups create <name>                     Create group",
+		"  groups delete <name> [--force]           Delete group",
+		"  selftest                                 Check the pure helpers",
+		"  --version                                Print the version",
+		"",
+		"Contact fields:",
+		`  ${scalars.map((f) => `--${f}`).join(" ")}`,
+		"",
+		"Repeatable fields, as label:value — repeat for more than one:",
+		`  ${multi.map((f) => `--${f}`).join(" ")}`,
+		"  Example: --email work:me@co.com --email home:me@home.com",
+		"",
+		"Other options:",
+		`  --replace <field>     Empty a collection before adding: ${multi.join(", ")}`,
+		"  --note-append <text>  Append to the note instead of replacing it",
+		"  --group <name>        Add to a group on create, filter on list",
+		"  --json                Read contact JSON from stdin (create, update)",
+		"  --format json         Emit JSON instead of text",
+		"  --force               Confirm a destructive operation",
+	].join("\n");
+}
+
+// --- Selftest ---
+
+// Everything below the read/render boundary is a pure function of plain data,
+// so it can be checked without Contacts.app, without permission, and without
+// touching a single contact. This is where the logic that actually goes wrong
+// lives: label parsing, column fitting, date formatting, key aliasing.
+function cmdSelftest() {
+	const failures = [];
+	const check = (label, actual, expected) => {
+		const a = JSON.stringify(actual);
+		const e = JSON.stringify(expected);
+		if (a !== e)
+			failures.push(`${label}\n    expected ${e}\n    got      ${a}`);
+	};
+
+	check(
+		"parseLabelValue splits on the first colon",
+		parseLabelValue("work:a@b.com", "home"),
+		{ label: "work", value: "a@b.com" },
+	);
+	check(
+		"parseLabelValue falls back to the default label",
+		parseLabelValue("a@b.com", "home"),
+		{ label: "home", value: "a@b.com" },
+	);
+	check(
+		"parseLabelValue leaves a URL scheme alone",
+		parseLabelValue("https://example.com", "home"),
+		{ label: "home", value: "https://example.com" },
+	);
+	check(
+		"parseLabelValue labels a URL when asked",
+		parseLabelValue("site:https://example.com", "home"),
+		{ label: "site", value: "https://example.com" },
+	);
+
+	check(
+		"unwrapLabel unwraps a built-in label",
+		unwrapLabel("_$!<Mobile>!$_"),
+		"Mobile",
+	);
+	check(
+		"unwrapLabel passes a custom label through",
+		unwrapLabel("rep mobile"),
+		"rep mobile",
+	);
+
+	check("padRight pads", padRight("ab", 5), "ab   ");
+	check("padRight does not truncate", padRight("abcdef", 3), "abcdef");
+	check("fit truncates and keeps a gutter", fit("abcdef", 4), "abc ");
+	check("fit pads when short", fit("ab", 4), "ab  ");
+
+	check(
+		"formatDate uses local components",
+		formatDate(new Date(1990, 4, 14, 12, 0, 0)),
+		"1990-05-14",
+	);
+	check(
+		"parseDateFlag round-trips",
+		formatDate(parseDateFlag("1990-05-14", "birthday")),
+		"1990-05-14",
+	);
+
+	check(
+		"jsonKeyToFlag maps a Contacts property",
+		jsonKeyToFlag("organization"),
+		"org",
+	);
+	check("jsonKeyToFlag maps an alias", jsonKeyToFlag("nameSuffix"), "suffix");
+	check(
+		"jsonKeyToFlag passes a collection key through",
+		jsonKeyToFlag("emails"),
+		"emails",
+	);
+
+	check(
+		"parseArgs separates flags from positionals",
+		parseArgs(["delete", "--force", "a1b2c3d4"], 1),
+		{ flags: { force: true }, positionals: ["a1b2c3d4"] },
+	);
+	check(
+		"parseArgs accumulates a repeatable flag",
+		parseArgs(["create", "--email", "a", "--email", "b"], 1),
+		{ flags: { email: ["a", "b"] }, positionals: [] },
+	);
+
+	check(
+		"formatTable reports an empty result",
+		formatTable([]),
+		"(no contacts)",
+	);
+	check(
+		"formatTable sizes columns to the data",
+		formatTable([
+			{
+				shortId: "A1B2C3D4",
+				name: "Ada",
+				email: "a@b.co",
+				phone: "555",
+				organization: "Acme",
+			},
+		]).split("\n")[0],
+		"ID        Name  Email   Phone  Organization",
+	);
+
+	check(
+		"formatCard renders a record",
+		formatCard({
+			id: "A1B2C3D4-0000:ABPerson",
+			fields: { name: "Ada L", firstName: "Ada", note: "hello" },
+			multi: {
+				emails: [{ label: "work", value: "a@b.co" }],
+				phones: [],
+				urls: [],
+				relatedNames: [],
+				instantMessages: [],
+				customDates: [],
+			},
+			addresses: [],
+			socialProfiles: [],
+			groups: ["Friends"],
+		}),
+		[
+			"ID:           A1B2C3D4 (A1B2C3D4-0000:ABPerson)",
+			"Name:         Ada L",
+			"First:        Ada",
+			"work:         a@b.co",
+			"Groups:       Friends",
+			"",
+			"Note:",
+			"hello",
+		].join("\n"),
+	);
+
+	if (failures.length > 0) {
+		writeStderr(`selftest: ${failures.length} failed`);
+		for (let i = 0; i < failures.length; i++) writeStderr(`  ${failures[i]}`);
+		$.exit(1);
+	}
+	writeStdout("selftest: ok");
+}
 
 // --- Command dispatch ---
 
 function main() {
 	const args = getArgs();
 	if (args.length === 0) {
-		writeStdout(USAGE);
+		writeStdout(usage());
 		return;
 	}
 
@@ -328,13 +835,21 @@ function main() {
 		case "groups":
 			cmdGroups(args);
 			break;
+		case "selftest":
+			cmdSelftest();
+			break;
+		case "version":
+		case "--version":
+		case "-v":
+			writeStdout(`cx ${VERSION}`);
+			break;
 		case "help":
 		case "--help":
 		case "-h":
-			writeStdout(USAGE);
+			writeStdout(usage());
 			break;
 		default:
-			exitWithError(`unknown command: ${command}\n\n${USAGE}`, 1);
+			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
 	}
 }
 
@@ -360,54 +875,109 @@ function parseLabelValue(str, defaultLabel) {
 	return { label: defaultLabel, value: str };
 }
 
-function applyScalarFields(person, flags) {
-	if (flags.first !== undefined) person.firstName = flags.first;
-	if (flags.last !== undefined) person.lastName = flags.last;
-	if (flags.middle !== undefined) person.middleName = flags.middle;
-	if (flags.suffix !== undefined) person.suffix = flags.suffix;
-	if (flags.nickname !== undefined) person.nickname = flags.nickname;
-	if (flags.maiden !== undefined) person.maidenName = flags.maiden;
-	if (flags.org !== undefined) person.organization = flags.org;
-	if (flags.title !== undefined) person.jobTitle = flags.title;
-	if (flags.dept !== undefined) person.department = flags.dept;
-	if (flags.note !== undefined) person.note = flags.note;
-	if (flags.birthday !== undefined) {
-		person.birthDate = new Date(flags.birthday);
+// The note is the field cx exists to reach — it is the whole reason for
+// choosing JXA over CNContactStore — and the one no other tool on the machine
+// backs up independently. Replacing a non-empty note echoes the previous text
+// to stderr so it survives in scrollback; --note-append adds to it instead.
+// stdout is untouched, so anything parsing output is unaffected.
+function applyNote(person, fields) {
+	const append = fields["note-append"];
+	if (append !== undefined) {
+		const existing = person.note() || "";
+		person.note = existing ? `${existing}\n${append}` : append;
+		return;
+	}
+	if (fields.note === undefined) return;
+	const existing = person.note();
+	if (existing && existing !== fields.note) {
+		writeStderr(`previous note for ${shortId(person.id())}:\n${existing}`);
+	}
+	person.note = fields.note;
+}
+
+function applyScalarFields(person, fields) {
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (!spec.flag || spec.manual) continue;
+		if (fields[spec.flag] === undefined) continue;
+		person[spec.prop] =
+			spec.type === "date"
+				? parseDateFlag(fields[spec.flag], spec.flag)
+				: fields[spec.flag];
 	}
 }
 
-function addMultiValueFields(app, person, flags) {
-	if (flags.email) {
-		for (let i = 0; i < flags.email.length; i++) {
-			const e = parseLabelValue(flags.email[i], "home");
-			person.emails.push(app.Email({ label: e.label, value: e.value }));
+// JSON supplies emails and phones as {label, value} objects where flag input
+// supplies "label:value" strings. Only JSON produces these keys.
+// --replace <field> empties a collection before the append pass. That is also
+// how a collection is cleared: --replace email with no --email leaves none.
+// It is the only operation that destroys data below the person level, so an
+// unknown field name is an error rather than a silent no-op.
+function clearReplacedCollections(app, person, fields) {
+	if (!fields.replace) return;
+	for (let i = 0; i < fields.replace.length; i++) {
+		const spec = multiSpecForFlag(fields.replace[i]);
+		if (!spec) {
+			exitWithError(
+				`--replace expects a repeatable field name, got: ${fields.replace[i]}`,
+				1,
+			);
 		}
+		clearCollection(app, person, spec);
 	}
-	if (flags.phone) {
-		for (let j = 0; j < flags.phone.length; j++) {
-			const ph = parseLabelValue(flags.phone[j], "home");
-			person.phones.push(app.Phone({ label: ph.label, value: ph.value }));
-		}
+}
+
+function clearCollection(app, person, spec) {
+	const items = person[spec.coll]();
+	// Backwards: deleting shifts the indices of everything after.
+	for (let j = items.length - 1; j >= 0; j--) {
+		app.delete(items[j]);
 	}
-	if (flags.url) {
-		for (let k = 0; k < flags.url.length; k++) {
-			const u = parseLabelValue(flags.url[k], "home");
-			person.urls.push(app.Url({ label: u.label, value: u.value }));
-		}
+}
+
+// A JSON update replaces any collection its payload names, where flag input
+// appends unless told otherwise. Both semantics are now stated; before this,
+// JSON update silently ignored collections altogether.
+function replaceObjectCollections(app, person, fields) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.json || !fields[spec.json]) continue;
+		clearCollection(app, person, spec);
 	}
-	if (flags.related) {
-		for (let r = 0; r < flags.related.length; r++) {
-			const rel = parseLabelValue(flags.related[r], "friend");
-			person.relatedNames.push(
-				app.RelatedName({ label: rel.label, value: rel.value }),
+	addObjectCollections(app, person, fields);
+}
+
+function addObjectCollections(app, person, fields) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.json || !fields[spec.json]) continue;
+		const items = fields[spec.json];
+		for (let j = 0; j < items.length; j++) {
+			person[spec.coll].push(
+				app[spec.ctor]({
+					label: items[j].label || spec.defaultLabel,
+					value: items[j].value,
+				}),
 			);
 		}
 	}
-	if (flags.date) {
-		for (let d = 0; d < flags.date.length; d++) {
-			const dt = parseLabelValue(flags.date[d], "anniversary");
-			person.customDates.push(
-				app.CustomDate({ label: dt.label, value: dt.value }),
+}
+
+function addMultiValueFields(app, person, fields) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.flag || !fields[spec.flag]) continue;
+		const values = fields[spec.flag];
+		for (let j = 0; j < values.length; j++) {
+			const lv = parseLabelValue(values[j], spec.defaultLabel);
+			person[spec.coll].push(
+				app[spec.ctor]({
+					label: lv.label,
+					value:
+						spec.type === "date"
+							? parseDateFlag(lv.value, spec.flag)
+							: lv.value,
+				}),
 			);
 		}
 	}
@@ -416,31 +986,23 @@ function addMultiValueFields(app, person, flags) {
 // --- Commands ---
 
 function cmdList(args) {
-	const flags = parseFlags(args, 1);
+	const flags = parseArgs(args, 1).flags;
+	const format = outputFormat(flags);
 	const app = getApp();
 
-	let people;
-	if (flags.group) {
-		const groups = app.groups.whose({ name: flags.group })();
-		if (groups.length === 0)
-			exitWithError(`group not found: ${flags.group}`, 3);
-		people = groups[0].people();
-	} else {
-		people = app.people();
-	}
+	const collection = flags.group
+		? resolveGroup(app, flags.group).people
+		: app.people;
 
-	const summaries = [];
-	for (let i = 0; i < people.length; i++) {
-		summaries.push(contactSummary(people[i]));
-	}
-
-	summaries.sort((a, b) => a.name.localeCompare(b.name));
-
-	writeStdout(formatTable(summaries));
+	printSummaries(readSummaries(collection), format);
 }
 function cmdSearch(args) {
-	if (args.length < 2) exitWithError("usage: cx search <query>", 1);
-	const query = args[1];
+	const parsed = parseArgs(args, 1);
+	const format = outputFormat(parsed.flags);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx search <query>", 1);
+	}
+	const query = parsed.positionals[0];
 	const app = getApp();
 
 	const people = app.people.whose({
@@ -454,267 +1016,217 @@ function cmdSearch(args) {
 
 	const summaries = [];
 	for (let i = 0; i < people.length; i++) {
-		summaries.push(contactSummary(people[i]));
+		summaries.push(readSummary(people[i]));
 	}
 
-	summaries.sort((a, b) => a.name.localeCompare(b.name));
-
-	writeStdout(formatTable(summaries));
+	printSummaries(summaries, format);
 }
 function cmdGet(args) {
-	if (args.length < 2) exitWithError("usage: cx get <id>", 1);
+	const parsed = parseArgs(args, 1);
+	const format = outputFormat(parsed.flags);
+	if (parsed.positionals.length === 0) exitWithError("usage: cx get <id>", 1);
 	const app = getApp();
-	const person = resolveId(app, args[1]);
-	writeStdout(formatCard(person));
+	const record = readCard(resolveId(app, parsed.positionals[0]));
+	emit(format, record, () => formatCard(record));
 }
 function cmdCreate(args) {
-	let flags = parseFlags(args, 1);
+	const fields = readInput(args, 1).fields;
+
+	if (!fields.first && !fields.last && !fields.org) {
+		exitWithError("create requires at least --first, --last or --org", 1);
+	}
+
 	const app = getApp();
-
-	if (flags.json) {
-		const input = readStdin().trim();
-		if (!input) exitWithError("--json requires JSON on stdin", 1);
-		try {
-			flags = JSON.parse(input);
-		} catch (e) {
-			exitWithError(`invalid JSON: ${e.message}`, 1);
-		}
-		if (flags.firstName !== undefined) flags.first = flags.firstName;
-		if (flags.lastName !== undefined) flags.last = flags.lastName;
-		if (flags.middleName !== undefined) flags.middle = flags.middleName;
-		if (flags.nameSuffix !== undefined) flags.suffix = flags.nameSuffix;
-		if (flags.organization !== undefined) flags.org = flags.organization;
-		if (flags.jobTitle !== undefined) flags.title = flags.jobTitle;
-		if (flags.department !== undefined) flags.dept = flags.department;
-		flags.json = true;
-	}
-
-	if (!flags.first && !flags.last) {
-		exitWithError("create requires at least --first or --last", 1);
-	}
+	validateFields(fields);
+	const targetGroup = fields.group ? resolveGroup(app, fields.group) : null;
 
 	const personProps = {};
-	if (flags.first) personProps.firstName = flags.first;
-	if (flags.last) personProps.lastName = flags.last;
+	if (fields.first) personProps.firstName = fields.first;
+	if (fields.last) personProps.lastName = fields.last;
+	// Contacts models a business as a person record flagged as a company,
+	// displayed by organization rather than by name.
+	if (!fields.first && !fields.last) personProps.company = true;
 
 	const person = app.Person(personProps);
 	app.people.push(person);
 
-	applyScalarFields(person, flags);
+	applyScalarFields(person, fields);
+	applyNote(person, fields);
+	addMultiValueFields(app, person, fields);
+	addObjectCollections(app, person, fields);
 
-	if (flags.json && !Array.isArray(flags.email)) {
-		if (flags.emails) {
-			for (let i = 0; i < flags.emails.length; i++) {
-				person.emails.push(
-					app.Email({
-						label: flags.emails[i].label || "home",
-						value: flags.emails[i].value,
-					}),
-				);
-			}
-		}
-		if (flags.phones) {
-			for (let j = 0; j < flags.phones.length; j++) {
-				person.phones.push(
-					app.Phone({
-						label: flags.phones[j].label || "home",
-						value: flags.phones[j].value,
-					}),
-				);
-			}
-		}
-	} else {
-		addMultiValueFields(app, person, flags);
-	}
+	if (targetGroup) app.add(person, { to: targetGroup });
 
-	if (flags.group) {
-		const groups = app.groups.whose({ name: flags.group })();
-		if (groups.length === 0)
-			exitWithError(`group not found: ${flags.group}`, 3);
-		app.add(person, { to: groups[0] });
-	}
-
-	app.save();
-	writeStdout(
-		"Created " +
-			(person.name() || "(no name)") +
-			" (" +
-			shortId(person.id()) +
-			")",
-	);
+	saveOrFail(app);
+	emitAction(outputFormat(fields), "created", person);
 }
 function cmdUpdate(args) {
-	if (args.length < 2)
+	const input = readInput(args, 1);
+	if (input.positionals.length === 0) {
 		exitWithError("usage: cx update <id> [--field value ...]", 1);
+	}
 	const app = getApp();
-	const person = resolveId(app, args[1]);
-	let flags = parseFlags(args, 2);
+	const person = resolveId(app, input.positionals[0]);
+	const fields = input.fields;
 
-	if (flags.json) {
-		const input = readStdin().trim();
-		if (!input) exitWithError("--json requires JSON on stdin", 1);
-		try {
-			flags = JSON.parse(input);
-		} catch (e) {
-			exitWithError(`invalid JSON: ${e.message}`, 1);
-		}
-		if (flags.firstName !== undefined) flags.first = flags.firstName;
-		if (flags.lastName !== undefined) flags.last = flags.lastName;
-		if (flags.middleName !== undefined) flags.middle = flags.middleName;
-		if (flags.nameSuffix !== undefined) flags.suffix = flags.nameSuffix;
-		if (flags.organization !== undefined) flags.org = flags.organization;
-		if (flags.jobTitle !== undefined) flags.title = flags.jobTitle;
-		if (flags.department !== undefined) flags.dept = flags.department;
-		flags.json = true;
+	validateFields(fields);
+	applyScalarFields(person, fields);
+	applyNote(person, fields);
+
+	if (input.source === "flags") {
+		clearReplacedCollections(app, person, fields);
+		addMultiValueFields(app, person, fields);
+	} else {
+		replaceObjectCollections(app, person, fields);
 	}
 
-	applyScalarFields(person, flags);
-
-	if (!flags.json) {
-		addMultiValueFields(app, person, flags);
-	}
-
-	app.save();
-	writeStdout(
-		"Updated " +
-			(person.name() || "(no name)") +
-			" (" +
-			shortId(person.id()) +
-			")",
-	);
+	saveOrFail(app);
+	emitAction(outputFormat(fields), "updated", person);
 }
 function cmdDelete(args) {
-	if (args.length < 2) exitWithError("usage: cx delete <id> [--force]", 1);
+	const parsed = parseArgs(args, 1);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx delete <id> [--force]", 1);
+	}
+	const format = outputFormat(parsed.flags);
 	const app = getApp();
-	const person = resolveId(app, args[1]);
-	const flags = parseFlags(args, 2);
+	const person = resolveId(app, parsed.positionals[0]);
+	const flags = parsed.flags;
 	const name = person.name() || "(no name)";
-	const sid = shortId(person.id());
+	const id = person.id();
+	const sid = shortId(id);
 
 	if (!flags.force) {
-		const s = contactSummary(person);
-		writeStdout(`Will delete: ${s.name} (${sid})`);
-		if (s.email) writeStdout(`  Email: ${s.email}`);
-		if (s.phone) writeStdout(`  Phone: ${s.phone}`);
-		if (s.organization) writeStdout(`  Org:   ${s.organization}`);
-		writeStdout("\nRe-run with --force to confirm.");
-		ObjC.import("stdlib");
-		$.exit(5);
+		const s = readSummary(person);
+		emit(format, { action: "confirmation-required", target: s }, () => {
+			const lines = [`Will delete: ${s.name} (${sid})`];
+			if (s.email) lines.push(`  Email: ${s.email}`);
+			if (s.phone) lines.push(`  Phone: ${s.phone}`);
+			if (s.organization) lines.push(`  Org:   ${s.organization}`);
+			return lines.join("\n");
+		});
+		exitAwaitingConfirmation(format);
 	}
 
 	app.delete(person);
-	app.save();
-	writeStdout(`Deleted ${name} (${sid})`);
+	saveOrFail(app);
+	// id is read before the delete: reading it after throws -1728, the object
+	// is gone.
+	emit(
+		format,
+		{ action: "deleted", id: id, shortId: sid, name: name },
+		() => `Deleted ${name} (${sid})`,
+	);
 }
 function cmdGroups(args) {
-	if (args.length < 2) exitWithError("usage: cx groups <subcommand> [args]", 1);
-	const sub = args[1];
+	const parsed = parseArgs(args, 1);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx groups <subcommand> [args]", 1);
+	}
+	const sub = parsed.positionals[0];
+	const rest = parsed.positionals.slice(1);
+	const format = outputFormat(parsed.flags);
 	const app = getApp();
 
 	switch (sub) {
 		case "list":
-			groupsList(app);
+			groupsList(app, format);
 			break;
 		case "members":
-			if (args.length < 3) exitWithError("usage: cx groups members <name>", 1);
-			groupsMembers(app, args[2]);
+			if (rest.length < 1) exitWithError("usage: cx groups members <name>", 1);
+			groupsMembers(app, rest[0], format);
 			break;
 		case "add":
-			if (args.length < 4)
+			if (rest.length < 2)
 				exitWithError("usage: cx groups add <contact-id> <group-name>", 1);
-			groupsAdd(app, args[2], args[3]);
+			groupsAdd(app, rest[0], rest[1], format);
 			break;
 		case "remove":
-			if (args.length < 4)
+			if (rest.length < 2)
 				exitWithError("usage: cx groups remove <contact-id> <group-name>", 1);
-			groupsRemove(app, args[2], args[3]);
+			groupsRemove(app, rest[0], rest[1], format);
 			break;
 		case "create":
-			if (args.length < 3) exitWithError("usage: cx groups create <name>", 1);
-			groupsCreate(app, args[2]);
+			if (rest.length < 1) exitWithError("usage: cx groups create <name>", 1);
+			groupsCreate(app, rest[0], format);
 			break;
 		case "delete":
-			if (args.length < 3)
+			if (rest.length < 1)
 				exitWithError("usage: cx groups delete <name> [--force]", 1);
-			groupsDelete(app, args[2], parseFlags(args, 3));
+			groupsDelete(app, rest[0], parsed.flags, format);
 			break;
 		default:
 			exitWithError(`unknown groups subcommand: ${sub}`, 1);
 	}
 }
 
-function groupsList(app) {
-	const groups = app.groups();
-	if (groups.length === 0) {
-		writeStdout("(no groups)");
-		return;
-	}
-	const names = [];
-	for (let i = 0; i < groups.length; i++) {
-		names.push(groups[i].name());
-	}
+function groupsList(app, format) {
+	const names = app.groups.name();
 	names.sort();
-	writeStdout(names.join("\n"));
+	emit(format, names, () =>
+		names.length === 0 ? "(no groups)" : names.join("\n"),
+	);
 }
 
-function groupsMembers(app, name) {
-	const groups = app.groups.whose({ name: name })();
-	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
-
-	const people = groups[0].people();
-	const summaries = [];
-	for (let i = 0; i < people.length; i++) {
-		summaries.push(contactSummary(people[i]));
-	}
-	summaries.sort((a, b) => a.name.localeCompare(b.name));
-	writeStdout(formatTable(summaries));
+function groupsMembers(app, name, format) {
+	printSummaries(readSummaries(resolveGroup(app, name).people), format);
 }
 
-function groupsAdd(app, contactId, groupName) {
+function groupsAdd(app, contactId, groupName, format) {
 	const person = resolveId(app, contactId);
-	const groups = app.groups.whose({ name: groupName })();
-	if (groups.length === 0) exitWithError(`group not found: ${groupName}`, 3);
-
-	app.add(person, { to: groups[0] });
-	app.save();
-	writeStdout(`Added ${person.name() || "(no name)"} to ${groupName}`);
+	app.add(person, { to: resolveGroup(app, groupName) });
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "added", group: groupName, name: person.name() || "(no name)" },
+		() => `Added ${person.name() || "(no name)"} to ${groupName}`,
+	);
 }
 
-function groupsRemove(app, contactId, groupName) {
+function groupsRemove(app, contactId, groupName, format) {
 	const person = resolveId(app, contactId);
-	const groups = app.groups.whose({ name: groupName })();
-	if (groups.length === 0) exitWithError(`group not found: ${groupName}`, 3);
-
-	app.remove(person, { from: groups[0] });
-	app.save();
-	writeStdout(`Removed ${person.name() || "(no name)"} from ${groupName}`);
+	app.remove(person, { from: resolveGroup(app, groupName) });
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "removed", group: groupName, name: person.name() || "(no name)" },
+		() => `Removed ${person.name() || "(no name)"} from ${groupName}`,
+	);
 }
 
-function groupsCreate(app, name) {
-	const existing = app.groups.whose({ name: name })();
-	if (existing.length > 0) exitWithError(`group already exists: ${name}`, 1);
+function groupsCreate(app, name, format) {
+	if (findGroup(app, name)) exitWithError(`group already exists: ${name}`, 1);
 
 	const group = app.Group({ name: name });
 	app.groups.push(group);
-	app.save();
-	writeStdout(`Created group: ${name}`);
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "group-created", group: name },
+		() => `Created group: ${name}`,
+	);
 }
 
-function groupsDelete(app, name, flags) {
-	const groups = app.groups.whose({ name: name })();
-	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
+function groupsDelete(app, name, flags, format) {
+	const group = resolveGroup(app, name);
 
 	if (!flags.force) {
-		const memberCount = groups[0].people().length;
-		writeStdout(`Will delete group: ${name} (${memberCount} members)`);
-		writeStdout("\nRe-run with --force to confirm.");
-		ObjC.import("stdlib");
-		$.exit(5);
+		const memberCount = group.people().length;
+		emit(
+			format,
+			{ action: "confirmation-required", group: name, members: memberCount },
+			() => `Will delete group: ${name} (${memberCount} members)`,
+		);
+		exitAwaitingConfirmation(format);
 	}
 
-	app.delete(groups[0]);
-	app.save();
-	writeStdout(`Deleted group: ${name}`);
+	app.delete(group);
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "group-deleted", group: name },
+		() => `Deleted group: ${name}`,
+	);
 }
 
 // --- Run ---
