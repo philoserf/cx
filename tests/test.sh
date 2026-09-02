@@ -240,6 +240,12 @@ assert_contains "2000-01-02" "$output"
 assert_exit 1 "$CX" create --first "${DATE_PREFIX}bad" --birthday "14 May 1990"
 assert_exit 1 "$CX" create --first "${DATE_PREFIX}bad" --birthday "2026-02-30"
 
+# Before C3 these two rejected creates pushed the contact first and parsed the
+# date after, leaving CxTest_<pid>Dbad orphans that no cleanup tracked, because
+# a failed create never returns an ID to track.
+output=$("$CX" search "${DATE_PREFIX}bad" 2>&1)
+assert_not_contains "${DATE_PREFIX}bad" "$output"
+
 # --- Test: create validation ---
 # cmdCreate used to push the person into the store before resolving the group
 # or parsing dates, so a failure left a half-built contact behind.
