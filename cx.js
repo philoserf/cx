@@ -131,6 +131,46 @@ function contactSummary(person) {
 	};
 }
 
+// One Apple Event per property for a whole collection, instead of one per
+// contact per property. Measured at 341 contacts: five plural calls total
+// ~0.7s, against ~48s for the equivalent per-contact loop.
+//
+// Only valid on an element collection — app.people, or a group's people.
+// Plural access on a whose() specifier measured 13.3s for 256 names, worse
+// than the loop, so cmdSearch keeps contactSummary.
+function readSummaries(collection) {
+	const ids = collection.id();
+	const names = collection.name();
+	const orgs = collection.organization();
+	const emails = collection.emails.value();
+	const phones = collection.phones.value();
+
+	// Separate events, paired by index. If Contacts ever returned arrays of
+	// different lengths, pairing them would attribute one person's email to
+	// another, so refuse rather than guess.
+	if (
+		names.length !== ids.length ||
+		orgs.length !== ids.length ||
+		emails.length !== ids.length ||
+		phones.length !== ids.length
+	) {
+		exitWithError("Contacts returned mismatched property arrays", 1);
+	}
+
+	const summaries = [];
+	for (let i = 0; i < ids.length; i++) {
+		summaries.push({
+			id: ids[i],
+			shortId: shortId(ids[i]),
+			name: names[i] || "(no name)",
+			email: emails[i] && emails[i].length > 0 ? emails[i][0] : "",
+			phone: phones[i] && phones[i].length > 0 ? phones[i][0] : "",
+			organization: orgs[i] || "",
+		});
+	}
+	return summaries;
+}
+
 function formatTable(summaries) {
 	if (summaries.length === 0) return "(no contacts)";
 
@@ -448,20 +488,17 @@ function cmdList(args) {
 	const flags = parseFlags(args, 1);
 	const app = getApp();
 
-	let people;
+	let collection;
 	if (flags.group) {
 		const groups = app.groups.whose({ name: flags.group })();
 		if (groups.length === 0)
 			exitWithError(`group not found: ${flags.group}`, 3);
-		people = groups[0].people();
+		collection = groups[0].people;
 	} else {
-		people = app.people();
+		collection = app.people;
 	}
 
-	const summaries = [];
-	for (let i = 0; i < people.length; i++) {
-		summaries.push(contactSummary(people[i]));
-	}
+	const summaries = readSummaries(collection);
 
 	summaries.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -690,11 +727,7 @@ function groupsMembers(app, name) {
 	const groups = app.groups.whose({ name: name })();
 	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
 
-	const people = groups[0].people();
-	const summaries = [];
-	for (let i = 0; i < people.length; i++) {
-		summaries.push(contactSummary(people[i]));
-	}
+	const summaries = readSummaries(groups[0].people);
 	summaries.sort((a, b) => a.name.localeCompare(b.name));
 	writeStdout(formatTable(summaries));
 }
