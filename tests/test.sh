@@ -294,6 +294,25 @@ CREATED_IDS+=("$ORDER_ID")
 output=$("$CX" search "${ORDER_PREFIX}" 2>&1)
 assert_not_contains "${ORDER_PREFIX}" "$output"
 
+# --- Test: note protection ---
+echo ""
+echo "=== Note protection ==="
+NOTE_PREFIX="${TEST_PREFIX}N"
+output=$("$CX" create --first "${NOTE_PREFIX}" --last "Person" --note "original note" 2>&1)
+NOTE_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$NOTE_ID")
+
+# The replaced note goes to stderr, never stdout.
+output=$("$CX" update "$NOTE_ID" --note "replacement note" 2>/dev/null)
+assert_not_contains "original note" "$output"
+output=$("$CX" update "$NOTE_ID" --note "second note" 2>&1 >/dev/null)
+assert_contains "replacement note" "$output"
+
+"$CX" update "$NOTE_ID" --note-append "appended line"
+output=$("$CX" get "$NOTE_ID" 2>&1)
+assert_contains "second note" "$output"
+assert_contains "appended line" "$output"
+
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
 # holds for any non-trivial address book. Exit 3 here would mean the prefix

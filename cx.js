@@ -408,7 +408,8 @@ const SCALARS = [
 	{ flag: "title", prop: "jobTitle", display: "Job Title" },
 	{ flag: "dept", prop: "department", display: "Department" },
 	{ flag: "birthday", prop: "birthDate", display: "Birthday", type: "date" },
-	{ flag: "note", prop: "note" },
+	// Handled by applyNote, not the generic setter — see there.
+	{ flag: "note", prop: "note", manual: true },
 ];
 
 // One row per repeatable field, read by the parser, the writer, the JSON
@@ -635,10 +636,31 @@ function parseLabelValue(str, defaultLabel) {
 	return { label: defaultLabel, value: str };
 }
 
+// The note is the field cx exists to reach — it is the whole reason for
+// choosing JXA over CNContactStore — and the one no other tool on the machine
+// backs up independently. Replacing a non-empty note echoes the previous text
+// to stderr so it survives in scrollback; --note-append adds to it instead.
+// stdout is untouched, so anything parsing output is unaffected.
+function applyNote(person, fields) {
+	const append = fields["note-append"];
+	if (append !== undefined) {
+		const existing = person.note() || "";
+		person.note = existing ? `${existing}\n${append}` : append;
+		return;
+	}
+	if (fields.note === undefined) return;
+	const existing = person.note();
+	if (existing && existing !== fields.note) {
+		writeStderr(`previous note for ${shortId(person.id())}:\n${existing}`);
+	}
+	person.note = fields.note;
+}
+
 function applyScalarFields(person, fields) {
 	for (let i = 0; i < SCALARS.length; i++) {
 		const spec = SCALARS[i];
-		if (!spec.flag || fields[spec.flag] === undefined) continue;
+		if (!spec.flag || spec.manual) continue;
+		if (fields[spec.flag] === undefined) continue;
 		person[spec.prop] =
 			spec.type === "date"
 				? parseDateFlag(fields[spec.flag], spec.flag)
@@ -744,6 +766,7 @@ function cmdCreate(args) {
 	app.people.push(person);
 
 	applyScalarFields(person, fields);
+	applyNote(person, fields);
 	addMultiValueFields(app, person, fields);
 	addObjectCollections(app, person, fields);
 
@@ -769,6 +792,7 @@ function cmdUpdate(args) {
 
 	validateFields(fields);
 	applyScalarFields(person, fields);
+	applyNote(person, fields);
 
 	// JSON update still cannot add multi-values. E3 gives it replace semantics.
 	if (input.source === "flags") {
