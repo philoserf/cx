@@ -153,6 +153,82 @@ CREATED_IDS=()
 output=$("$CX" search "${TEST_PREFIX}" 2>&1)
 assert_not_contains "${TEST_PREFIX}" "$output"
 
+# --- Test: create via JSON ---
+echo ""
+echo "=== Create (JSON) ==="
+JSON_PREFIX="${TEST_PREFIX}J"
+output=$(printf '{"firstName":"%s","lastName":"Person","note":"json note from cx","jobTitle":"Drafter","emails":[{"label":"work","value":"%s@example.com"}],"phones":[{"label":"mobile","value":"555-0142"}]}' "$JSON_PREFIX" "$JSON_PREFIX" | "$CX" create --json 2>&1)
+echo "$output"
+assert_contains "Created" "$output"
+
+JSON_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+echo "  Contact ID: $JSON_ID"
+CREATED_IDS+=("$JSON_ID")
+
+output=$("$CX" get "$JSON_ID" 2>&1)
+assert_contains "json note from cx" "$output"
+assert_contains "Drafter" "$output"
+assert_contains "${JSON_PREFIX}@example.com" "$output"
+assert_contains "555-0142" "$output"
+
+# --- Test: update via JSON ---
+echo ""
+echo "=== Update (JSON) ==="
+printf '{"note":"json updated note","department":"Verification","emails":[{"label":"home","value":"%s-home@example.com"}]}' "$JSON_PREFIX" | "$CX" update "$JSON_ID" --json
+output=$("$CX" get "$JSON_ID" 2>&1)
+assert_contains "json updated note" "$output"
+assert_contains "Verification" "$output"
+
+# Characterization: cmdUpdate skips addMultiValueFields in JSON mode, so an
+# "emails" key on update is silently ignored. Commit E3 gives JSON update
+# replace semantics for collections — invert this assertion then.
+assert_not_contains "${JSON_PREFIX}-home@example.com" "$output"
+
+# --- Test: list ---
+# The only coverage of cmdList. Slow (~70s on a real address book) until the
+# bulk-fetch work in commit E1 lands.
+echo ""
+echo "=== List ==="
+output=$("$CX" list 2>&1)
+assert_contains "${JSON_PREFIX}" "$output"
+
+# --- Test: create with --group ---
+echo ""
+echo "=== Create (--group) ==="
+CGROUP_NAME="${TEST_PREFIX}_CGroup"
+"$CX" groups create "$CGROUP_NAME"
+CREATED_GROUPS+=("$CGROUP_NAME")
+
+FLAG_PREFIX="${TEST_PREFIX}F"
+output=$("$CX" create --first "${FLAG_PREFIX}" --last "Person" --group "$CGROUP_NAME" 2>&1)
+echo "$output"
+FLAG_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$FLAG_ID")
+
+output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
+assert_contains "${FLAG_PREFIX}" "$output"
+
+# Characterization: --group is DROPPED in JSON mode. cmdCreate replaces the
+# parsed flags with the JSON payload (cx.js:480) before reading flags.group
+# (cx.js:531), so the flag never survives. Commit D1 fixes this — invert this
+# assertion then.
+JGROUP_PREFIX="${TEST_PREFIX}JG"
+output=$(printf '{"firstName":"%s","lastName":"Person"}' "$JGROUP_PREFIX" | "$CX" create --json --group "$CGROUP_NAME" 2>&1)
+echo "$output"
+JGROUP_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CREATED_IDS+=("$JGROUP_ID")
+
+output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
+assert_not_contains "${JGROUP_PREFIX}" "$output"
+
+# --- Test: ambiguous ID ---
+# Assumes at least two contacts share the leading hex digit of JSON_ID, which
+# holds for any non-trivial address book. Exit 3 here would mean the prefix
+# matched nothing, which cannot happen since JSON_ID itself starts with it.
+echo ""
+echo "=== Ambiguous ID ==="
+assert_exit 4 "$CX" get "${JSON_ID:0:1}"
+
 # --- Test: error cases ---
 echo ""
 echo "=== Error Cases ==="
