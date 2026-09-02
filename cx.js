@@ -275,32 +275,65 @@ function readSummaries(collection) {
 function formatTable(summaries) {
 	if (summaries.length === 0) return "(no contacts)";
 
+	// Widths follow the data rather than being fixed at 10/30/30/18, so a long
+	// email is no longer cut without a trace. Capped so one outlier cannot push
+	// the table off the far side of a terminal. The last column is unpadded and
+	// uncapped, as it always was.
+	const columns = [
+		{ header: "ID", key: "shortId", max: 10 },
+		{ header: "Name", key: "name", max: 34 },
+		{ header: "Email", key: "email", max: 36 },
+		{ header: "Phone", key: "phone", max: 20 },
+		{ header: "Organization", key: "organization" },
+	];
+
+	for (let c = 0; c < columns.length - 1; c++) {
+		let width = columns[c].header.length;
+		for (let i = 0; i < summaries.length; i++) {
+			const value = summaries[i][columns[c].key] || "";
+			if (value.length > width) width = value.length;
+		}
+		columns[c].width = Math.min(width, columns[c].max) + 2;
+	}
+
+	const row = (values) => {
+		let line = "";
+		for (let c = 0; c < columns.length - 1; c++) {
+			line += fit(values[c], columns[c].width);
+		}
+		return line + values[columns.length - 1];
+	};
+
 	const lines = [];
-	const header =
-		padRight("ID", 10) +
-		padRight("Name", 30) +
-		padRight("Email", 30) +
-		padRight("Phone", 18) +
-		"Organization";
+	const header = row(columns.map((col) => col.header));
 	lines.push(header);
 	lines.push("-".repeat(header.length));
 
 	for (let i = 0; i < summaries.length; i++) {
 		const s = summaries[i];
-		lines.push(
-			padRight(s.shortId, 10) +
-				padRight(s.name, 30) +
-				padRight(s.email, 30) +
-				padRight(s.phone, 18) +
-				s.organization,
-		);
+		lines.push(row(columns.map((col) => s[col.key] || "")));
 	}
 	return lines.join("\n");
 }
 
 function padRight(str, len) {
-	if (str.length >= len) return `${str.substring(0, len - 1)} `;
-	return str + " ".repeat(len - str.length);
+	return str.length >= len ? str : str + " ".repeat(len - str.length);
+}
+
+// Pads to a column width, or truncates to it keeping one space as a gutter.
+// Character counts assume one column per UTF-16 unit, so CJK and emoji names
+// misalign; that is accepted for a personal tool rather than fixed.
+function fit(str, len) {
+	return str.length >= len
+		? `${str.substring(0, len - 1)} `
+		: padRight(str, len);
+}
+
+// Contacts wraps its built-in labels as _$!<Mobile>!$_. A label the user
+// typed passes through unchanged.
+function unwrapLabel(label) {
+	const m = /^_\$!<(.*)>!\$_$/.exec(label);
+	return m ? m[1] : label;
 }
 
 // Reading and rendering are separate: readCard turns a live Contacts object
@@ -332,7 +365,7 @@ function readCard(person) {
 		const list = [];
 		for (let m = 0; m < items.length; m++) {
 			list.push({
-				label: items[m].label() || spec.display,
+				label: unwrapLabel(items[m].label() || spec.display),
 				value: formatValue(items[m].value()),
 			});
 		}
@@ -343,7 +376,7 @@ function readCard(person) {
 	const rawAddresses = person.addresses();
 	for (let a = 0; a < rawAddresses.length; a++) {
 		addresses.push({
-			label: rawAddresses[a].label() || "Address",
+			label: unwrapLabel(rawAddresses[a].label() || "Address"),
 			value: (rawAddresses[a].formattedAddress() || "").replace(/\n/g, ", "),
 		});
 	}
