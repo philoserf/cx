@@ -48,8 +48,12 @@ function saveOrFail(app) {
 // contact is left in the store with no save to complete it. Parsing here is
 // cheap and pure, so the later real parse just repeats it.
 function validateFields(fields) {
-	if (fields.birthday !== undefined) {
-		parseDateFlag(fields.birthday, "birthday");
+	for (let h = 0; h < SCALARS.length; h++) {
+		const spec = SCALARS[h];
+		if (spec.type !== "date" || !spec.flag) continue;
+		if (fields[spec.flag] !== undefined) {
+			parseDateFlag(fields[spec.flag], spec.flag);
+		}
 	}
 	for (let i = 0; i < MULTI.length; i++) {
 		const spec = MULTI[i];
@@ -259,42 +263,25 @@ function formatCard(person) {
 
 	lines.push(`ID:           ${shortId(id)} (${id})`);
 
-	const nameFields = [
-		["Name", person.name()],
-		["First", person.firstName()],
-		["Last", person.lastName()],
-		["Middle", person.middleName()],
-		[
-			"Prefix",
-			(() => {
-				try {
-					return person.namePrefix();
-				} catch (_e) {
-					return null;
-				}
-			})(),
-		],
-		["Suffix", person.suffix()],
-		["Nickname", person.nickname()],
-		["Maiden", person.maidenName()],
-	];
-	for (let i = 0; i < nameFields.length; i++) {
-		if (nameFields[i][1])
-			lines.push(padRight(`${nameFields[i][0]}:`, 14) + nameFields[i][1]);
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (!spec.display) continue;
+		let value;
+		if (spec.guarded) {
+			try {
+				value = person[spec.prop]();
+			} catch (_e) {
+				value = null;
+			}
+		} else {
+			value = person[spec.prop]();
+		}
+		if (!value) continue;
+		lines.push(
+			padRight(`${spec.display}:`, 14) +
+				(spec.type === "date" ? formatDate(value) : value),
+		);
 	}
-
-	const orgFields = [
-		["Organization", person.organization()],
-		["Job Title", person.jobTitle()],
-		["Department", person.department()],
-	];
-	for (let j = 0; j < orgFields.length; j++) {
-		if (orgFields[j][1])
-			lines.push(padRight(`${orgFields[j][0]}:`, 14) + orgFields[j][1]);
-	}
-
-	const birthday = person.birthDate();
-	if (birthday) lines.push(`Birthday:     ${formatDate(birthday)}`);
 
 	for (let k = 0; k < MULTI.length; k++) {
 		const spec = MULTI[k];
@@ -353,6 +340,27 @@ function getArgs() {
 	return args;
 }
 
+// One row per single-valued field, in card order. flag is absent where cx can
+// render the field but not set it; display is absent where the field is
+// rendered somewhere other than the label column. json names the payload key
+// where it differs from the Contacts property name.
+const SCALARS = [
+	{ prop: "name", display: "Name" },
+	{ flag: "first", prop: "firstName", display: "First" },
+	{ flag: "last", prop: "lastName", display: "Last" },
+	{ flag: "middle", prop: "middleName", display: "Middle" },
+	// namePrefix throws -1700 on some contacts; the read stays guarded.
+	{ prop: "namePrefix", display: "Prefix", guarded: true },
+	{ flag: "suffix", prop: "suffix", json: "nameSuffix", display: "Suffix" },
+	{ flag: "nickname", prop: "nickname", display: "Nickname" },
+	{ flag: "maiden", prop: "maidenName", display: "Maiden" },
+	{ flag: "org", prop: "organization", display: "Organization" },
+	{ flag: "title", prop: "jobTitle", display: "Job Title" },
+	{ flag: "dept", prop: "department", display: "Department" },
+	{ flag: "birthday", prop: "birthDate", display: "Birthday", type: "date" },
+	{ flag: "note", prop: "note" },
+];
+
 // One row per repeatable field, read by the parser, the writer, the JSON
 // collection writer and the renderer. Adding a field is one row; before this
 // it was four edits in four places, and missing one gave a field that parsed
@@ -408,15 +416,13 @@ function multiSpecForFlag(flag) {
 }
 
 // JSON input uses Contacts' own property names; flag input uses short forms.
-const JSON_KEY_ALIASES = {
-	firstName: "first",
-	lastName: "last",
-	middleName: "middle",
-	nameSuffix: "suffix",
-	organization: "org",
-	jobTitle: "title",
-	department: "dept",
-};
+function jsonKeyToFlag(key) {
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (spec.flag && (key === spec.prop || key === spec.json)) return spec.flag;
+	}
+	return key;
+}
 
 // Returns the flags and the leftover positional arguments, so no command has
 // to reach into args by index and a flag may appear anywhere. Before this,
@@ -482,7 +488,7 @@ function readInput(args, startIndex) {
 	const payloadKeys = Object.keys(payload);
 	for (let j = 0; j < payloadKeys.length; j++) {
 		const key = payloadKeys[j];
-		fields[JSON_KEY_ALIASES[key] || key] = payload[key];
+		fields[jsonKeyToFlag(key)] = payload[key];
 	}
 
 	return { source: "json", fields: fields, positionals: parsed.positionals };
@@ -579,19 +585,14 @@ function parseLabelValue(str, defaultLabel) {
 	return { label: defaultLabel, value: str };
 }
 
-function applyScalarFields(person, flags) {
-	if (flags.first !== undefined) person.firstName = flags.first;
-	if (flags.last !== undefined) person.lastName = flags.last;
-	if (flags.middle !== undefined) person.middleName = flags.middle;
-	if (flags.suffix !== undefined) person.suffix = flags.suffix;
-	if (flags.nickname !== undefined) person.nickname = flags.nickname;
-	if (flags.maiden !== undefined) person.maidenName = flags.maiden;
-	if (flags.org !== undefined) person.organization = flags.org;
-	if (flags.title !== undefined) person.jobTitle = flags.title;
-	if (flags.dept !== undefined) person.department = flags.dept;
-	if (flags.note !== undefined) person.note = flags.note;
-	if (flags.birthday !== undefined) {
-		person.birthDate = parseDateFlag(flags.birthday, "birthday");
+function applyScalarFields(person, fields) {
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (!spec.flag || fields[spec.flag] === undefined) continue;
+		person[spec.prop] =
+			spec.type === "date"
+				? parseDateFlag(fields[spec.flag], spec.flag)
+				: fields[spec.flag];
 	}
 }
 
