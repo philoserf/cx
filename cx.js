@@ -34,8 +34,8 @@ function exitWithError(message, code) {
 
 // The two-step --force protocol: print what would be destroyed, exit 5, and
 // let the caller decide. Not an error, so it does not go through stderr.
-function exitAwaitingConfirmation() {
-	writeStdout("\nRe-run with --force to confirm.");
+function exitAwaitingConfirmation(format) {
+	if (format !== "json") writeStdout("\nRe-run with --force to confirm.");
 	$.exit(5);
 }
 
@@ -86,10 +86,38 @@ function resolveGroup(app, name) {
 	return group;
 }
 
-// Every list of contacts is sorted by display name and rendered as a table.
-function printSummaries(summaries) {
+// One place decides between rendering and serialising, so --format json is a
+// serialiser rather than a second renderer. Every command emits the same
+// records its formatters consume.
+function outputFormat(flags) {
+	const format = flags.format || "text";
+	if (format !== "text" && format !== "json") {
+		exitWithError(`--format expects text or json, got: ${format}`, 1);
+	}
+	return format;
+}
+
+// Write commands report what they did. In text that is one line; in JSON it
+// is the same facts a caller would otherwise parse back out of that line.
+function emitAction(format, action, person) {
+	const name = person.name() || "(no name)";
+	const id = person.id();
+	const verb = action === "created" ? "Created" : "Updated";
+	emit(
+		format,
+		{ action: action, id: id, shortId: shortId(id), name: name },
+		() => `${verb} ${name} (${shortId(id)})`,
+	);
+}
+
+function emit(format, data, renderText) {
+	writeStdout(format === "json" ? JSON.stringify(data, null, 2) : renderText());
+}
+
+// Every list of contacts is sorted by display name before rendering.
+function printSummaries(summaries, format) {
 	summaries.sort((a, b) => a.name.localeCompare(b.name));
-	writeStdout(formatTable(summaries));
+	emit(format, summaries, () => formatTable(summaries));
 }
 
 // Application() is lazy: it builds a proxy without contacting Contacts, so a
@@ -748,18 +776,22 @@ function addMultiValueFields(app, person, fields) {
 
 function cmdList(args) {
 	const flags = parseArgs(args, 1).flags;
+	const format = outputFormat(flags);
 	const app = getApp();
 
 	const collection = flags.group
 		? resolveGroup(app, flags.group).people
 		: app.people;
 
-	printSummaries(readSummaries(collection));
+	printSummaries(readSummaries(collection), format);
 }
 function cmdSearch(args) {
-	const positionals = parseArgs(args, 1).positionals;
-	if (positionals.length === 0) exitWithError("usage: cx search <query>", 1);
-	const query = positionals[0];
+	const parsed = parseArgs(args, 1);
+	const format = outputFormat(parsed.flags);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx search <query>", 1);
+	}
+	const query = parsed.positionals[0];
 	const app = getApp();
 
 	const people = app.people.whose({
@@ -776,14 +808,15 @@ function cmdSearch(args) {
 		summaries.push(readSummary(people[i]));
 	}
 
-	printSummaries(summaries);
+	printSummaries(summaries, format);
 }
 function cmdGet(args) {
-	const positionals = parseArgs(args, 1).positionals;
-	if (positionals.length === 0) exitWithError("usage: cx get <id>", 1);
+	const parsed = parseArgs(args, 1);
+	const format = outputFormat(parsed.flags);
+	if (parsed.positionals.length === 0) exitWithError("usage: cx get <id>", 1);
 	const app = getApp();
-	const person = resolveId(app, positionals[0]);
-	writeStdout(formatCard(readCard(person)));
+	const record = readCard(resolveId(app, parsed.positionals[0]));
+	emit(format, record, () => formatCard(record));
 }
 function cmdCreate(args) {
 	const fields = readInput(args, 1).fields;
@@ -814,13 +847,7 @@ function cmdCreate(args) {
 	if (targetGroup) app.add(person, { to: targetGroup });
 
 	saveOrFail(app);
-	writeStdout(
-		"Created " +
-			(person.name() || "(no name)") +
-			" (" +
-			shortId(person.id()) +
-			")",
-	);
+	emitAction(outputFormat(fields), "created", person);
 }
 function cmdUpdate(args) {
 	const input = readInput(args, 1);
@@ -843,37 +870,42 @@ function cmdUpdate(args) {
 	}
 
 	saveOrFail(app);
-	writeStdout(
-		"Updated " +
-			(person.name() || "(no name)") +
-			" (" +
-			shortId(person.id()) +
-			")",
-	);
+	emitAction(outputFormat(fields), "updated", person);
 }
 function cmdDelete(args) {
 	const parsed = parseArgs(args, 1);
 	if (parsed.positionals.length === 0) {
 		exitWithError("usage: cx delete <id> [--force]", 1);
 	}
+	const format = outputFormat(parsed.flags);
 	const app = getApp();
 	const person = resolveId(app, parsed.positionals[0]);
 	const flags = parsed.flags;
 	const name = person.name() || "(no name)";
-	const sid = shortId(person.id());
+	const id = person.id();
+	const sid = shortId(id);
 
 	if (!flags.force) {
 		const s = readSummary(person);
-		writeStdout(`Will delete: ${s.name} (${sid})`);
-		if (s.email) writeStdout(`  Email: ${s.email}`);
-		if (s.phone) writeStdout(`  Phone: ${s.phone}`);
-		if (s.organization) writeStdout(`  Org:   ${s.organization}`);
-		exitAwaitingConfirmation();
+		emit(format, { action: "confirmation-required", target: s }, () => {
+			const lines = [`Will delete: ${s.name} (${sid})`];
+			if (s.email) lines.push(`  Email: ${s.email}`);
+			if (s.phone) lines.push(`  Phone: ${s.phone}`);
+			if (s.organization) lines.push(`  Org:   ${s.organization}`);
+			return lines.join("\n");
+		});
+		exitAwaitingConfirmation(format);
 	}
 
 	app.delete(person);
 	saveOrFail(app);
-	writeStdout(`Deleted ${name} (${sid})`);
+	// id is read before the delete: reading it after throws -1728, the object
+	// is gone.
+	emit(
+		format,
+		{ action: "deleted", id: id, shortId: sid, name: name },
+		() => `Deleted ${name} (${sid})`,
+	);
 }
 function cmdGroups(args) {
 	const parsed = parseArgs(args, 1);
@@ -882,93 +914,108 @@ function cmdGroups(args) {
 	}
 	const sub = parsed.positionals[0];
 	const rest = parsed.positionals.slice(1);
+	const format = outputFormat(parsed.flags);
 	const app = getApp();
 
 	switch (sub) {
 		case "list":
-			groupsList(app);
+			groupsList(app, format);
 			break;
 		case "members":
 			if (rest.length < 1) exitWithError("usage: cx groups members <name>", 1);
-			groupsMembers(app, rest[0]);
+			groupsMembers(app, rest[0], format);
 			break;
 		case "add":
 			if (rest.length < 2)
 				exitWithError("usage: cx groups add <contact-id> <group-name>", 1);
-			groupsAdd(app, rest[0], rest[1]);
+			groupsAdd(app, rest[0], rest[1], format);
 			break;
 		case "remove":
 			if (rest.length < 2)
 				exitWithError("usage: cx groups remove <contact-id> <group-name>", 1);
-			groupsRemove(app, rest[0], rest[1]);
+			groupsRemove(app, rest[0], rest[1], format);
 			break;
 		case "create":
 			if (rest.length < 1) exitWithError("usage: cx groups create <name>", 1);
-			groupsCreate(app, rest[0]);
+			groupsCreate(app, rest[0], format);
 			break;
 		case "delete":
 			if (rest.length < 1)
 				exitWithError("usage: cx groups delete <name> [--force]", 1);
-			groupsDelete(app, rest[0], parsed.flags);
+			groupsDelete(app, rest[0], parsed.flags, format);
 			break;
 		default:
 			exitWithError(`unknown groups subcommand: ${sub}`, 1);
 	}
 }
 
-function groupsList(app) {
-	const groups = app.groups();
-	if (groups.length === 0) {
-		writeStdout("(no groups)");
-		return;
-	}
-	const names = [];
-	for (let i = 0; i < groups.length; i++) {
-		names.push(groups[i].name());
-	}
+function groupsList(app, format) {
+	const names = app.groups.name();
 	names.sort();
-	writeStdout(names.join("\n"));
+	emit(format, names, () =>
+		names.length === 0 ? "(no groups)" : names.join("\n"),
+	);
 }
 
-function groupsMembers(app, name) {
-	printSummaries(readSummaries(resolveGroup(app, name).people));
+function groupsMembers(app, name, format) {
+	printSummaries(readSummaries(resolveGroup(app, name).people), format);
 }
 
-function groupsAdd(app, contactId, groupName) {
+function groupsAdd(app, contactId, groupName, format) {
 	const person = resolveId(app, contactId);
 	app.add(person, { to: resolveGroup(app, groupName) });
 	saveOrFail(app);
-	writeStdout(`Added ${person.name() || "(no name)"} to ${groupName}`);
+	emit(
+		format,
+		{ action: "added", group: groupName, name: person.name() || "(no name)" },
+		() => `Added ${person.name() || "(no name)"} to ${groupName}`,
+	);
 }
 
-function groupsRemove(app, contactId, groupName) {
+function groupsRemove(app, contactId, groupName, format) {
 	const person = resolveId(app, contactId);
 	app.remove(person, { from: resolveGroup(app, groupName) });
 	saveOrFail(app);
-	writeStdout(`Removed ${person.name() || "(no name)"} from ${groupName}`);
+	emit(
+		format,
+		{ action: "removed", group: groupName, name: person.name() || "(no name)" },
+		() => `Removed ${person.name() || "(no name)"} from ${groupName}`,
+	);
 }
 
-function groupsCreate(app, name) {
+function groupsCreate(app, name, format) {
 	if (findGroup(app, name)) exitWithError(`group already exists: ${name}`, 1);
 
 	const group = app.Group({ name: name });
 	app.groups.push(group);
 	saveOrFail(app);
-	writeStdout(`Created group: ${name}`);
+	emit(
+		format,
+		{ action: "group-created", group: name },
+		() => `Created group: ${name}`,
+	);
 }
 
-function groupsDelete(app, name, flags) {
+function groupsDelete(app, name, flags, format) {
 	const group = resolveGroup(app, name);
 
 	if (!flags.force) {
 		const memberCount = group.people().length;
-		writeStdout(`Will delete group: ${name} (${memberCount} members)`);
-		exitAwaitingConfirmation();
+		emit(
+			format,
+			{ action: "confirmation-required", group: name, members: memberCount },
+			() => `Will delete group: ${name} (${memberCount} members)`,
+		);
+		exitAwaitingConfirmation(format);
 	}
 
 	app.delete(group);
 	saveOrFail(app);
-	writeStdout(`Deleted group: ${name}`);
+	emit(
+		format,
+		{ action: "group-deleted", group: name },
+		() => `Deleted group: ${name}`,
+	);
 }
 
 // --- Run ---

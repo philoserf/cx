@@ -69,6 +69,18 @@ assert_not_contains() {
 	fi
 }
 
+assert_json() {
+	local output="$1"
+	if echo "$output" | json_pp >/dev/null 2>&1; then
+		echo "  PASS: output is valid JSON"
+		PASS=$((PASS + 1))
+	else
+		echo "  FAIL: output is not valid JSON"
+		echo "  Got: $output"
+		FAIL=$((FAIL + 1))
+	fi
+}
+
 # --- Test: usage ---
 echo "=== Usage ==="
 output=$("$CX" 2>&1 || true)
@@ -348,6 +360,30 @@ CREATED_IDS+=("$ORG_ID")
 output=$("$CX" get "$ORG_ID" 2>&1)
 assert_contains "${ORG_PREFIX} Industries" "$output"
 assert_contains "555-0188" "$output"
+
+# --- Test: json output ---
+# Every command takes --format json, so a caller never has to parse columns.
+echo ""
+echo "=== JSON output ==="
+FMT_PREFIX="${TEST_PREFIX}Fmt"
+output=$("$CX" create --first "${FMT_PREFIX}" --last "Person" --email "work:${FMT_PREFIX}@example.com" --format json 2>&1)
+assert_json "$output"
+assert_contains '"action": "created"' "$output"
+FMT_ID=$(echo "$output" | grep -o '[A-F0-9]\{8\}' | head -1)
+CREATED_IDS+=("$FMT_ID")
+
+assert_json "$("$CX" get "$FMT_ID" --format json 2>&1)"
+assert_json "$("$CX" search "${FMT_PREFIX}" --format json 2>&1)"
+assert_json "$("$CX" list --format json 2>&1)"
+assert_json "$("$CX" groups list --format json 2>&1)"
+
+# The confirmation step is structured too, and still exits 5.
+output=$("$CX" delete "$FMT_ID" --format json 2>&1 || true)
+assert_json "$output"
+assert_contains "confirmation-required" "$output"
+assert_exit 5 "$CX" delete "$FMT_ID" --format json
+
+assert_exit 1 "$CX" get "$FMT_ID" --format yaml
 
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
