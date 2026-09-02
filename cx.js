@@ -608,36 +608,206 @@ function readInput(args, startIndex) {
 
 // --- Usage ---
 
-const USAGE = [
-	"Usage: cx <command> [options]",
-	"",
-	"Commands:",
-	"  list [--group <name>]                    List contacts",
-	"  search <query>                           Search contacts",
-	"  get <id>                                 Show contact details",
-	"  create --first <n> --last <n> [opts]     Create contact",
-	"  update <id> [opts]                       Update contact",
-	"  delete <id> [--force]                    Delete contact",
-	"  groups list                              List groups",
-	"  groups members <name>                    List group members",
-	"  groups add <id> <group>                  Add contact to group",
-	"  groups remove <id> <group>               Remove contact from group",
-	"  groups create <name>                     Create group",
-	"  groups delete <name> [--force]           Delete group",
-	"",
-	"Multi-value flags (--email, --phone, --url, --related, --date):",
-	"  Repeat for multiple values. Use label:value syntax.",
-	"  Example: --email work:me@co.com --email home:me@home.com",
-	"",
-	"  --json    Read full contact JSON from stdin (create/update only)",
-].join("\n");
+const VERSION = "1.0.0";
+
+// The options sections are generated from the catalogues, so the help text
+// cannot drift from the parser. It used to say "[opts]" and stop, leaving
+// eight flags documented nowhere.
+function usage() {
+	const flagsOf = (table) => {
+		const names = [];
+		for (let i = 0; i < table.length; i++) {
+			if (table[i].flag) names.push(table[i].flag);
+		}
+		return names;
+	};
+	const scalars = flagsOf(SCALARS);
+	const multi = flagsOf(MULTI);
+
+	return [
+		"Usage: cx <command> [options]",
+		"",
+		"Commands:",
+		"  list [--group <name>]                    List contacts",
+		"  search <query>                           Search contacts",
+		"  get <id>                                 Show contact details",
+		"  create (--first|--last|--org) ... [opts] Create contact",
+		"  update <id> [opts]                       Update contact",
+		"  delete <id> [--force]                    Delete contact",
+		"  groups list                              List groups",
+		"  groups members <name>                    List group members",
+		"  groups add <id> <group>                  Add contact to group",
+		"  groups remove <id> <group>               Remove contact from group",
+		"  groups create <name>                     Create group",
+		"  groups delete <name> [--force]           Delete group",
+		"  selftest                                 Check the pure helpers",
+		"  --version                                Print the version",
+		"",
+		"Contact fields:",
+		`  ${scalars.map((f) => `--${f}`).join(" ")}`,
+		"",
+		"Repeatable fields, as label:value — repeat for more than one:",
+		`  ${multi.map((f) => `--${f}`).join(" ")}`,
+		"  Example: --email work:me@co.com --email home:me@home.com",
+		"",
+		"Other options:",
+		`  --replace <field>     Empty a collection before adding: ${multi.join(", ")}`,
+		"  --note-append <text>  Append to the note instead of replacing it",
+		"  --group <name>        Add to a group on create, filter on list",
+		"  --json                Read contact JSON from stdin (create, update)",
+		"  --format json         Emit JSON instead of text",
+		"  --force               Confirm a destructive operation",
+	].join("\n");
+}
+
+// --- Selftest ---
+
+// Everything below the read/render boundary is a pure function of plain data,
+// so it can be checked without Contacts.app, without permission, and without
+// touching a single contact. This is where the logic that actually goes wrong
+// lives: label parsing, column fitting, date formatting, key aliasing.
+function cmdSelftest() {
+	const failures = [];
+	const check = (label, actual, expected) => {
+		const a = JSON.stringify(actual);
+		const e = JSON.stringify(expected);
+		if (a !== e)
+			failures.push(`${label}\n    expected ${e}\n    got      ${a}`);
+	};
+
+	check(
+		"parseLabelValue splits on the first colon",
+		parseLabelValue("work:a@b.com", "home"),
+		{ label: "work", value: "a@b.com" },
+	);
+	check(
+		"parseLabelValue falls back to the default label",
+		parseLabelValue("a@b.com", "home"),
+		{ label: "home", value: "a@b.com" },
+	);
+	check(
+		"parseLabelValue leaves a URL scheme alone",
+		parseLabelValue("https://example.com", "home"),
+		{ label: "home", value: "https://example.com" },
+	);
+	check(
+		"parseLabelValue labels a URL when asked",
+		parseLabelValue("site:https://example.com", "home"),
+		{ label: "site", value: "https://example.com" },
+	);
+
+	check(
+		"unwrapLabel unwraps a built-in label",
+		unwrapLabel("_$!<Mobile>!$_"),
+		"Mobile",
+	);
+	check(
+		"unwrapLabel passes a custom label through",
+		unwrapLabel("rep mobile"),
+		"rep mobile",
+	);
+
+	check("padRight pads", padRight("ab", 5), "ab   ");
+	check("padRight does not truncate", padRight("abcdef", 3), "abcdef");
+	check("fit truncates and keeps a gutter", fit("abcdef", 4), "abc ");
+	check("fit pads when short", fit("ab", 4), "ab  ");
+
+	check(
+		"formatDate uses local components",
+		formatDate(new Date(1990, 4, 14, 12, 0, 0)),
+		"1990-05-14",
+	);
+	check(
+		"parseDateFlag round-trips",
+		formatDate(parseDateFlag("1990-05-14", "birthday")),
+		"1990-05-14",
+	);
+
+	check(
+		"jsonKeyToFlag maps a Contacts property",
+		jsonKeyToFlag("organization"),
+		"org",
+	);
+	check("jsonKeyToFlag maps an alias", jsonKeyToFlag("nameSuffix"), "suffix");
+	check(
+		"jsonKeyToFlag passes a collection key through",
+		jsonKeyToFlag("emails"),
+		"emails",
+	);
+
+	check(
+		"parseArgs separates flags from positionals",
+		parseArgs(["delete", "--force", "a1b2c3d4"], 1),
+		{ flags: { force: true }, positionals: ["a1b2c3d4"] },
+	);
+	check(
+		"parseArgs accumulates a repeatable flag",
+		parseArgs(["create", "--email", "a", "--email", "b"], 1),
+		{ flags: { email: ["a", "b"] }, positionals: [] },
+	);
+
+	check(
+		"formatTable reports an empty result",
+		formatTable([]),
+		"(no contacts)",
+	);
+	check(
+		"formatTable sizes columns to the data",
+		formatTable([
+			{
+				shortId: "A1B2C3D4",
+				name: "Ada",
+				email: "a@b.co",
+				phone: "555",
+				organization: "Acme",
+			},
+		]).split("\n")[0],
+		"ID        Name  Email   Phone  Organization",
+	);
+
+	check(
+		"formatCard renders a record",
+		formatCard({
+			id: "A1B2C3D4-0000:ABPerson",
+			fields: { name: "Ada L", firstName: "Ada", note: "hello" },
+			multi: {
+				emails: [{ label: "work", value: "a@b.co" }],
+				phones: [],
+				urls: [],
+				relatedNames: [],
+				instantMessages: [],
+				customDates: [],
+			},
+			addresses: [],
+			socialProfiles: [],
+			groups: ["Friends"],
+		}),
+		[
+			"ID:           A1B2C3D4 (A1B2C3D4-0000:ABPerson)",
+			"Name:         Ada L",
+			"First:        Ada",
+			"work:         a@b.co",
+			"Groups:       Friends",
+			"",
+			"Note:",
+			"hello",
+		].join("\n"),
+	);
+
+	if (failures.length > 0) {
+		writeStderr(`selftest: ${failures.length} failed`);
+		for (let i = 0; i < failures.length; i++) writeStderr(`  ${failures[i]}`);
+		$.exit(1);
+	}
+	writeStdout("selftest: ok");
+}
 
 // --- Command dispatch ---
 
 function main() {
 	const args = getArgs();
 	if (args.length === 0) {
-		writeStdout(USAGE);
+		writeStdout(usage());
 		return;
 	}
 
@@ -665,13 +835,21 @@ function main() {
 		case "groups":
 			cmdGroups(args);
 			break;
+		case "selftest":
+			cmdSelftest();
+			break;
+		case "version":
+		case "--version":
+		case "-v":
+			writeStdout(`cx ${VERSION}`);
+			break;
 		case "help":
 		case "--help":
 		case "-h":
-			writeStdout(USAGE);
+			writeStdout(usage());
 			break;
 		default:
-			exitWithError(`unknown command: ${command}\n\n${USAGE}`, 1);
+			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
 	}
 }
 

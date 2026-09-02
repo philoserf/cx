@@ -47,7 +47,7 @@ assert_exit() {
 assert_contains() {
 	local expected="$1"
 	local output="$2"
-	if echo "$output" | grep -q "$expected"; then
+	if echo "$output" | grep -q -- "$expected"; then
 		echo "  PASS: output contains '$expected'"
 		PASS=$((PASS + 1))
 	else
@@ -60,7 +60,7 @@ assert_contains() {
 assert_not_contains() {
 	local expected="$1"
 	local output="$2"
-	if echo "$output" | grep -q "$expected"; then
+	if echo "$output" | grep -q -- "$expected"; then
 		echo "  FAIL: output should not contain '$expected'"
 		FAIL=$((FAIL + 1))
 	else
@@ -85,6 +85,13 @@ assert_json() {
 echo "=== Usage ==="
 output=$("$CX" 2>&1 || true)
 assert_contains "Usage:" "$output"
+# Generated from the field catalogues, so it cannot drift from the parser.
+assert_contains "\-\-birthday" "$output"
+assert_contains "\-\-replace" "$output"
+assert_contains "\-\-format json" "$output"
+
+output=$("$CX" --version 2>&1)
+assert_contains "cx " "$output"
 
 # --- Test: create ---
 echo ""

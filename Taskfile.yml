@@ -19,8 +19,11 @@ tasks:
       - rm -f {{.INSTALL_DIR}}/cx
 
   test:
-    desc: Run integration tests
+    desc: Run selftest and integration tests
     cmds:
+      # Pure-function checks first: they need no permission and no contacts,
+      # so a logic regression fails in milliseconds rather than minutes.
+      - ./cx selftest
       - bash tests/test.sh
 
   bench:
