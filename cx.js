@@ -34,15 +34,30 @@ function exitWithError(message, code) {
 
 // --- Contacts.app helpers ---
 
+// Application() is lazy: it builds a proxy without contacting Contacts, so a
+// permission denial never surfaced in the try/catch that used to be here.
+// Force one cheap real access instead, so a TCC refusal is caught where it
+// actually happens and reported as exit 2 with the message written for it,
+// rather than as a raw JXA error on whatever the command touched first.
 function getApp() {
+	const app = Application("Contacts");
 	try {
-		return Application("Contacts");
-	} catch (_e) {
-		exitWithError(
-			"cannot access Contacts.app — grant access in System Settings > Privacy & Security > Automation",
-			2,
-		);
+		app.name();
+	} catch (e) {
+		if (isPermissionError(e)) {
+			exitWithError(
+				"cannot access Contacts.app — grant access in System Settings > Privacy & Security > Automation",
+				2,
+			);
+		}
+		throw e;
 	}
+	return app;
+}
+
+function isPermissionError(e) {
+	if (e.errorNumber === -1743 || e.errorNumber === -10004) return true;
+	return /not authori[sz]ed|not permitted|-1743/i.test(String(e.message || ""));
 }
 
 function shortId(fullId) {
