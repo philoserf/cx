@@ -1,4 +1,5 @@
 ObjC.import("Foundation");
+ObjC.import("stdlib");
 
 // --- Stderr / Stdout helpers ---
 
@@ -28,8 +29,14 @@ function readStdin() {
 
 function exitWithError(message, code) {
 	writeStderr(`error: ${message}`);
-	ObjC.import("stdlib");
 	$.exit(code || 1);
+}
+
+// The two-step --force protocol: print what would be destroyed, exit 5, and
+// let the caller decide. Not an error, so it does not go through stderr.
+function exitAwaitingConfirmation() {
+	writeStdout("\nRe-run with --force to confirm.");
+	$.exit(5);
 }
 
 // --- Contacts.app helpers ---
@@ -68,10 +75,21 @@ function validateFields(fields) {
 	}
 }
 
-function resolveGroup(app, name) {
+function findGroup(app, name) {
 	const groups = app.groups.whose({ name: name })();
-	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
-	return groups[0];
+	return groups.length > 0 ? groups[0] : null;
+}
+
+function resolveGroup(app, name) {
+	const group = findGroup(app, name);
+	if (!group) exitWithError(`group not found: ${name}`, 3);
+	return group;
+}
+
+// Every list of contacts is sorted by display name and rendered as a table.
+function printSummaries(summaries) {
+	summaries.sort((a, b) => a.name.localeCompare(b.name));
+	writeStdout(formatTable(summaries));
 }
 
 // Application() is lazy: it builds a proxy without contacting Contacts, so a
@@ -640,21 +658,11 @@ function cmdList(args) {
 	const flags = parseArgs(args, 1).flags;
 	const app = getApp();
 
-	let collection;
-	if (flags.group) {
-		const groups = app.groups.whose({ name: flags.group })();
-		if (groups.length === 0)
-			exitWithError(`group not found: ${flags.group}`, 3);
-		collection = groups[0].people;
-	} else {
-		collection = app.people;
-	}
+	const collection = flags.group
+		? resolveGroup(app, flags.group).people
+		: app.people;
 
-	const summaries = readSummaries(collection);
-
-	summaries.sort((a, b) => a.name.localeCompare(b.name));
-
-	writeStdout(formatTable(summaries));
+	printSummaries(readSummaries(collection));
 }
 function cmdSearch(args) {
 	const positionals = parseArgs(args, 1).positionals;
@@ -676,9 +684,7 @@ function cmdSearch(args) {
 		summaries.push(contactSummary(people[i]));
 	}
 
-	summaries.sort((a, b) => a.name.localeCompare(b.name));
-
-	writeStdout(formatTable(summaries));
+	printSummaries(summaries);
 }
 function cmdGet(args) {
 	const positionals = parseArgs(args, 1).positionals;
@@ -763,9 +769,7 @@ function cmdDelete(args) {
 		if (s.email) writeStdout(`  Email: ${s.email}`);
 		if (s.phone) writeStdout(`  Phone: ${s.phone}`);
 		if (s.organization) writeStdout(`  Org:   ${s.organization}`);
-		writeStdout("\nRe-run with --force to confirm.");
-		ObjC.import("stdlib");
-		$.exit(5);
+		exitAwaitingConfirmation();
 	}
 
 	app.delete(person);
@@ -828,37 +832,25 @@ function groupsList(app) {
 }
 
 function groupsMembers(app, name) {
-	const groups = app.groups.whose({ name: name })();
-	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
-
-	const summaries = readSummaries(groups[0].people);
-	summaries.sort((a, b) => a.name.localeCompare(b.name));
-	writeStdout(formatTable(summaries));
+	printSummaries(readSummaries(resolveGroup(app, name).people));
 }
 
 function groupsAdd(app, contactId, groupName) {
 	const person = resolveId(app, contactId);
-	const groups = app.groups.whose({ name: groupName })();
-	if (groups.length === 0) exitWithError(`group not found: ${groupName}`, 3);
-
-	app.add(person, { to: groups[0] });
+	app.add(person, { to: resolveGroup(app, groupName) });
 	saveOrFail(app);
 	writeStdout(`Added ${person.name() || "(no name)"} to ${groupName}`);
 }
 
 function groupsRemove(app, contactId, groupName) {
 	const person = resolveId(app, contactId);
-	const groups = app.groups.whose({ name: groupName })();
-	if (groups.length === 0) exitWithError(`group not found: ${groupName}`, 3);
-
-	app.remove(person, { from: groups[0] });
+	app.remove(person, { from: resolveGroup(app, groupName) });
 	saveOrFail(app);
 	writeStdout(`Removed ${person.name() || "(no name)"} from ${groupName}`);
 }
 
 function groupsCreate(app, name) {
-	const existing = app.groups.whose({ name: name })();
-	if (existing.length > 0) exitWithError(`group already exists: ${name}`, 1);
+	if (findGroup(app, name)) exitWithError(`group already exists: ${name}`, 1);
 
 	const group = app.Group({ name: name });
 	app.groups.push(group);
@@ -867,18 +859,15 @@ function groupsCreate(app, name) {
 }
 
 function groupsDelete(app, name, flags) {
-	const groups = app.groups.whose({ name: name })();
-	if (groups.length === 0) exitWithError(`group not found: ${name}`, 3);
+	const group = resolveGroup(app, name);
 
 	if (!flags.force) {
-		const memberCount = groups[0].people().length;
+		const memberCount = group.people().length;
 		writeStdout(`Will delete group: ${name} (${memberCount} members)`);
-		writeStdout("\nRe-run with --force to confirm.");
-		ObjC.import("stdlib");
-		$.exit(5);
+		exitAwaitingConfirmation();
 	}
 
-	app.delete(groups[0]);
+	app.delete(group);
 	saveOrFail(app);
 	writeStdout(`Deleted group: ${name}`);
 }
