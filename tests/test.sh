@@ -5,9 +5,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CX="$SCRIPT_DIR/../cx"
 PASS=0
 FAIL=0
-# The trailing underscore matters: the sweep matches with _contains, so a
-# bare pid prefix would also match a longer pid's run -- CxTest_1045 would
-# sweep a concurrent CxTest_10450 suite's contacts out from under it.
+# The trailing underscore matters: the sweep is a substring match, so a bare
+# pid prefix would also match a longer pid's run -- CxTest_1045 would sweep a
+# concurrent CxTest_10450 suite's contacts out from under it.
+#
+# Read that with care now: `cx search` matches name, organization, note, every
+# email and every phone, not the four name properties it once did. This sweep
+# deletes what it finds, so a real contact whose note or email happened to
+# contain this literal string would go with it. The prefix carries a pid, so
+# that is vanishingly unlikely -- but a reader auditing a destructive path
+# deserves to know the surface widened.
 TEST_PREFIX="CxTest_${$}_"
 
 # Cleanup asks Contacts what exists under our prefix rather than replaying a
@@ -133,10 +140,54 @@ CONTACT_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 echo "  Contact ID: $CONTACT_ID"
 
 # --- Test: search ---
+# Search used to be one whose() disjunction over firstName, lastName, name and
+# organization, so an email address, a phone number or note text found nothing
+# and said nothing. Contacts cannot express a predicate over an element
+# collection at all, so the match is in JavaScript now, over a plural fetch --
+# each assertion below reaches a field no specifier could have expressed.
 echo ""
 echo "=== Search ==="
 output=$("$CX" search "${TEST_PREFIX}" 2>&1)
 assert_contains "${TEST_PREFIX}" "$output"
+
+SEARCH_PREFIX="${TEST_PREFIX}S"
+output=$("$CX" create --first "${SEARCH_PREFIX}" --last "Person" \
+	--note "haystack ${SEARCH_PREFIX}notetoken" \
+	--email "work:one-${SEARCH_PREFIX}@example.com" \
+	--email "zzlabeltoken:two-${SEARCH_PREFIX}@example.com" \
+	--phone "mobile:555-0161" --format json 2>&1)
+assert_json "$output"
+SEARCH_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
+
+# The note -- the field cx exists to reach, and the one it could not find.
+assert_contains "${SEARCH_PREFIX}" "$("$CX" search "${SEARCH_PREFIX}notetoken" 2>&1)"
+# Both emails: readSummary only ever read emails[0], so even a widened whose()
+# would have missed the second.
+assert_contains "${SEARCH_PREFIX}" "$("$CX" search "one-${SEARCH_PREFIX}@example.com" 2>&1)"
+assert_contains "${SEARCH_PREFIX}" "$("$CX" search "two-${SEARCH_PREFIX}@example.com" 2>&1)"
+assert_contains "${SEARCH_PREFIX}" "$("$CX" search "555-0161" 2>&1)"
+# Labels are not part of the haystack: `cx search work` must not return every
+# contact that happens to have a work email.
+assert_not_contains "${SEARCH_PREFIX}" "$("$CX" search "zzlabeltoken" 2>&1)"
+# whose({_contains}) was case-insensitive; the JavaScript matcher keeps that.
+LOWER_PREFIX=$(echo "${SEARCH_PREFIX}" | tr '[:upper:]' '[:lower:]')
+assert_contains "${SEARCH_PREFIX}" "$("$CX" search "${LOWER_PREFIX}" 2>&1)"
+# A broad query used to cost 55s, one Apple Event per property per hit.
+assert_exit 0 "$CX" search e
+# A miss is still an empty table and exit 0, and still valid JSON.
+assert_contains "(no contacts)" "$("$CX" search "zzz-no-such-${SEARCH_PREFIX}" 2>&1)"
+assert_exit 0 "$CX" search "zzz-no-such-${SEARCH_PREFIX}"
+assert_json "$("$CX" search "zzz-no-such-${SEARCH_PREFIX}" --format json 2>&1)"
+# No query is still usage, and still exits before Contacts is opened.
+assert_exit 1 "$CX" search
+
+# The haystack is an internal key on an internal record. If it ever reaches
+# stdout, --format json has grown a field and every caller's parse changed.
+SEARCH_KEYS=$("$CX" search "${SEARCH_PREFIX}" --format json |
+	/usr/bin/jq -r '.[0] | keys_unsorted | join(",")')
+assert_contains "id,shortId,name,email,phone,organization" "$SEARCH_KEYS"
+
+"$CX" delete "$SEARCH_ID" --force >/dev/null
 
 # --- Test: get ---
 echo ""
