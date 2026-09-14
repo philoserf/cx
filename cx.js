@@ -51,30 +51,6 @@ function saveOrFail(app) {
 	}
 }
 
-// Nothing that can fail may run after app.people.push, or a partly-built
-// contact is left in the store with no save to complete it. Parsing here is
-// cheap and pure, so the later real parse just repeats it.
-function validateFields(fields) {
-	for (let h = 0; h < SCALARS.length; h++) {
-		const spec = SCALARS[h];
-		if (spec.type !== "date" || !spec.flag) continue;
-		if (fields[spec.flag] !== undefined) {
-			parseDateFlag(fields[spec.flag], spec.flag);
-		}
-	}
-	for (let i = 0; i < MULTI.length; i++) {
-		const spec = MULTI[i];
-		if (spec.type !== "date" || !spec.flag || !fields[spec.flag]) continue;
-		const values = fields[spec.flag];
-		for (let j = 0; j < values.length; j++) {
-			parseDateFlag(
-				parseLabelValue(values[j], spec.defaultLabel).value,
-				spec.flag,
-			);
-		}
-	}
-}
-
 function findGroup(app, name) {
 	const groups = app.groups.whose({ name: name })();
 	return groups.length > 0 ? groups[0] : null;
@@ -150,15 +126,17 @@ function shortId(fullId) {
 	return String(fullId).substring(0, 8);
 }
 
+// source names the input in the error -- "--birthday" for a flag, "customDates"
+// for a payload key -- so the message points at what the user actually typed.
 // Contacts stores a birthday as a date-only value at noon local time. Parsing
 // "1990-05-14" with new Date() gives UTC midnight, which is the previous day
 // in any negative UTC offset, and Contacts then records May 13. Building from
 // local components at noon avoids that, and avoids the timezones that skip
 // midnight entirely on a DST transition.
-function parseDateFlag(str, flagName) {
+function parseDateFlag(str, source) {
 	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
 	if (!m) {
-		exitWithError(`--${flagName} must be YYYY-MM-DD, got: ${str}`, 1);
+		exitWithError(`${source} must be YYYY-MM-DD, got: ${str}`, 1);
 	}
 	const year = Number(m[1]);
 	const month = Number(m[2]);
@@ -169,7 +147,7 @@ function parseDateFlag(str, flagName) {
 		date.getMonth() !== month - 1 ||
 		date.getDate() !== day
 	) {
-		exitWithError(`--${flagName} is not a real date: ${str}`, 1);
+		exitWithError(`${source} is not a real date: ${str}`, 1);
 	}
 	return date;
 }
@@ -454,7 +432,8 @@ function getArgs() {
 // One row per single-valued field, in card order. flag is absent where cx can
 // render the field but not set it; display is absent where the field is
 // rendered somewhere other than the label column. json names the payload key
-// where it differs from the Contacts property name.
+// where it differs from the Contacts property name -- a SCALARS concept only;
+// a collection's payload key is always its coll.
 const SCALARS = [
 	{ prop: "name", display: "Name" },
 	{ flag: "first", prop: "firstName", display: "First" },
@@ -473,14 +452,15 @@ const SCALARS = [
 	{ flag: "note", prop: "note", manual: true },
 ];
 
-// One row per repeatable field, read by the parser, the writer, the JSON
-// collection writer and the renderer. Adding a field is one row; before this
-// it was four edits in four places, and missing one gave a field that parsed
-// but never rendered. Order here is the order they appear on a card.
+// One row per repeatable field, read by the parser, the writer and the
+// renderer. Adding a field is one row; before this it was four edits in four
+// places, and missing one gave a field that parsed but never rendered. ctor is
+// the writable test: it is present on every row cx can construct and absent
+// only on instantMessages, which Contacts holds and cx only renders. Order
+// here is the order they appear on a card.
 const MULTI = [
 	{
 		flag: "email",
-		json: "emails",
 		coll: "emails",
 		ctor: "Email",
 		defaultLabel: "home",
@@ -488,7 +468,6 @@ const MULTI = [
 	},
 	{
 		flag: "phone",
-		json: "phones",
 		coll: "phones",
 		ctor: "Phone",
 		defaultLabel: "home",
@@ -527,20 +506,81 @@ function multiSpecForFlag(flag) {
 	return null;
 }
 
-// JSON input uses Contacts' own property names; flag input uses short forms.
-function jsonKeyToFlag(key) {
+// --replace names a collection. The flags are singular and the payload keys
+// are plural, and the README teaches the plural, so accept either rather than
+// rejecting the spelling the docs taught.
+function multiSpecForReplace(name) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (spec.ctor && (spec.flag === name || spec.coll === name)) return spec;
+	}
+	return null;
+}
+
+function scalarSpecForPayloadKey(key) {
 	for (let i = 0; i < SCALARS.length; i++) {
 		const spec = SCALARS[i];
-		if (spec.flag && (key === spec.prop || key === spec.json)) return spec.flag;
+		if (!spec.flag || spec.manual) continue;
+		if (key === spec.prop || key === spec.json) return spec;
 	}
-	return key;
+	return null;
 }
+
+function multiSpecForPayloadKey(key) {
+	for (let i = 0; i < MULTI.length; i++) {
+		if (MULTI[i].ctor && key === MULTI[i].coll) return MULTI[i];
+	}
+	return null;
+}
+
+function flagsOf(table) {
+	const names = [];
+	for (let i = 0; i < table.length; i++) {
+		if (table[i].flag) names.push(table[i].flag);
+	}
+	return names;
+}
+
+// Every flag each command honours, derived from the catalogues so it cannot
+// drift from them. A flag a command does not read is an error rather than a
+// silent no-op: `cx update <id> --nte "text"` used to print "Updated <name>"
+// and exit 0 having written nothing, which for the one field with no undo is
+// the worst available outcome.
+const KNOWN_FLAGS = {
+	list: ["format", "group"],
+	search: ["format"],
+	get: ["format"],
+	delete: ["format", "force"],
+	groups: ["format", "force"],
+	create: ["format", "json", "group", "note-append"].concat(
+		flagsOf(SCALARS),
+		flagsOf(MULTI),
+	),
+	update: ["format", "json", "note-append", "replace"].concat(
+		flagsOf(SCALARS),
+		flagsOf(MULTI),
+	),
+};
+
+// Contacts properties cx renders but cannot write. Naming them beats dropping
+// them: the README told users to pipe addresses and social profiles, which no
+// writer has ever read.
+const READ_ONLY_KEYS = [
+	"id",
+	"shortId",
+	"name",
+	"namePrefix",
+	"groups",
+	"addresses",
+	"socialProfiles",
+	"instantMessages",
+];
 
 // Returns the flags and the leftover positional arguments, so no command has
 // to reach into args by index and a flag may appear anywhere. Before this,
 // `cx delete --force <id>` treated --force as the contact ID and reported a
 // missing contact.
-function parseArgs(args, startIndex) {
+function parseArgs(args, startIndex, allowed) {
 	const flags = {};
 	const positionals = [];
 	for (let i = startIndex; i < args.length; i++) {
@@ -549,6 +589,9 @@ function parseArgs(args, startIndex) {
 			continue;
 		}
 		const key = args[i].substring(2);
+		if (allowed && allowed.indexOf(key) === -1) {
+			exitWithError(`unknown flag for this command: --${key}`, 1);
+		}
 		if (key === "force") {
 			flags.force = true;
 		} else if (key === "json") {
@@ -568,42 +611,201 @@ function parseArgs(args, startIndex) {
 	return { flags: flags, positionals: positionals };
 }
 
-// Both input modes normalise into one flag-space object, and the mode travels
-// beside the fields rather than inside them. Carrying it inside is what made
-// --group vanish in JSON mode: cmdCreate replaced the whole flags object with
-// the payload, so the flag the user typed was gone by the time it was read.
-function readInput(args, startIndex) {
-	const parsed = parseArgs(args, startIndex);
-	if (!parsed.flags.json) {
-		return {
-			source: "flags",
-			fields: parsed.flags,
-			positionals: parsed.positionals,
-		};
+// argv and the stdin payload become one plain record, and every rejection
+// happens here -- before getApp(), before app.people.push. Nothing that can
+// fail may run after the push, or a partly-built contact is left in the store
+// with no save to complete it; an unsaved push is visible to every other
+// process until Contacts.app quits, so the orphan is real.
+//
+// Being pure is the other half. The whole flag-and-payload mapping is now
+// reachable from `cx selftest` with no Contacts permission and no address
+// book, which is what the read/render boundary already gave the read side.
+//
+// The two dialects keep their own semantics deliberately: a repeated flag
+// appends, a payload names a collection wholesale and so replaces it. Only the
+// key spaces are merged -- everything is keyed by the Contacts property name.
+function buildChange(flags, payload) {
+	const change = {
+		scalars: {},
+		note: null,
+		collections: {},
+		group: flags.group || null,
+		format: outputFormat(flags),
+	};
+
+	// Contradictory, so refuse rather than quietly pick one. Precedence used to
+	// hand --note-append the win and discard --note without a word.
+	if (flags.note !== undefined && flags["note-append"] !== undefined) {
+		exitWithError("--note and --note-append are mutually exclusive", 1);
 	}
 
-	const stdin = readStdin().trim();
-	if (!stdin) exitWithError("--json requires JSON on stdin", 1);
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		if (!spec.flag || spec.manual) continue;
+		if (flags[spec.flag] === undefined) continue;
+		change.scalars[spec.prop] =
+			spec.type === "date"
+				? parseDateFlag(flags[spec.flag], `--${spec.flag}`)
+				: flags[spec.flag];
+	}
+
+	if (flags["note-append"] !== undefined) {
+		change.note = { mode: "append", text: flags["note-append"] };
+	} else if (flags.note !== undefined) {
+		change.note = { mode: "replace", text: flags.note };
+	}
+
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		if (!spec.flag || !spec.ctor || !flags[spec.flag]) continue;
+		const values = flags[spec.flag];
+		const items = [];
+		for (let j = 0; j < values.length; j++) {
+			const lv = parseLabelValue(values[j], spec.defaultLabel);
+			items.push({
+				label: lv.label,
+				value:
+					spec.type === "date"
+						? parseDateFlag(lv.value, `--${spec.flag}`)
+						: lv.value,
+			});
+		}
+		change.collections[spec.coll] = { mode: "append", items: items };
+	}
+
+	// --replace empties a collection before the adds. That is also how one is
+	// cleared: --replace email with no --email leaves none. It is the only
+	// operation that destroys data below the person level, so an unknown name is
+	// an error -- raised here, where nothing has been written yet.
+	if (flags.replace) {
+		for (let i = 0; i < flags.replace.length; i++) {
+			const spec = multiSpecForReplace(flags.replace[i]);
+			if (!spec) {
+				exitWithError(
+					`--replace expects a repeatable field name, got: ${flags.replace[i]}`,
+					1,
+				);
+			}
+			const existing = change.collections[spec.coll];
+			change.collections[spec.coll] = {
+				mode: "replace",
+				items: existing ? existing.items : [],
+			};
+		}
+	}
+
+	if (payload !== undefined) applyPayload(change, payload);
+	return change;
+}
+
+function applyPayload(change, payload) {
+	if (
+		payload === null ||
+		typeof payload !== "object" ||
+		Array.isArray(payload)
+	) {
+		exitWithError("--json expects a JSON object on stdin", 1);
+	}
+	const keys = Object.keys(payload);
+	// cx get --format json emits a nested envelope. Diagnose it up front: it
+	// carries id/name/groups too, and whichever of those came first would
+	// otherwise answer with a less useful message.
+	if (keys.indexOf("fields") !== -1 || keys.indexOf("multi") !== -1) {
+		exitWithError(
+			"cx get --format json emits a nested record that --json does not read; pass a flat object keyed by Contacts property names",
+			1,
+		);
+	}
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i];
+		const value = payload[key];
+
+		if (key === "note" || key === "note-append") {
+			if (typeof value !== "string") {
+				exitWithError(`${key} must be a string`, 1);
+			}
+			change.note = {
+				mode: key === "note" ? "replace" : "append",
+				text: value,
+			};
+			continue;
+		}
+
+		const scalar = scalarSpecForPayloadKey(key);
+		if (scalar) {
+			if (typeof value !== "string") {
+				exitWithError(`${key} must be a string`, 1);
+			}
+			change.scalars[scalar.prop] =
+				scalar.type === "date" ? parseDateFlag(value, key) : value;
+			continue;
+		}
+
+		const multi = multiSpecForPayloadKey(key);
+		if (multi) {
+			change.collections[multi.coll] = {
+				mode: "replace",
+				items: payloadItems(key, multi, value, change.collections[multi.coll]),
+			};
+			continue;
+		}
+
+		if (READ_ONLY_KEYS.indexOf(key) !== -1) {
+			exitWithError(`${key} is rendered but cannot be written`, 1);
+		}
+		exitWithError(`unknown key in JSON payload: ${key}`, 1);
+	}
+}
+
+function payloadItems(key, spec, value, existing) {
+	if (!Array.isArray(value)) {
+		exitWithError(`${key} must be an array of {label, value} objects`, 1);
+	}
+	const items = [];
+	for (let i = 0; i < value.length; i++) {
+		const item = value[i];
+		if (!item || typeof item !== "object" || Array.isArray(item)) {
+			exitWithError(`${key}[${i}] must be a {label, value} object`, 1);
+		}
+		if (typeof item.value !== "string") {
+			exitWithError(`${key}[${i}].value must be a string`, 1);
+		}
+		if (item.label !== undefined && typeof item.label !== "string") {
+			exitWithError(`${key}[${i}].label must be a string`, 1);
+		}
+		items.push({
+			label: item.label || spec.defaultLabel,
+			value: spec.type === "date" ? parseDateFlag(item.value, key) : item.value,
+		});
+	}
+	// The payload replaces the collection, so anything a repeated flag already
+	// put there goes in behind it rather than being dropped on the floor.
+	if (existing) {
+		for (let j = 0; j < existing.items.length; j++) {
+			items.push(existing.items[j]);
+		}
+	}
+	return items;
+}
+
+// A three-line shell around buildChange: read argv, read stdin, normalise.
+// Only this function touches stdin, which is why the logic is not in it.
+function readInput(command, args, startIndex) {
+	const parsed = parseArgs(args, startIndex, KNOWN_FLAGS[command]);
 	let payload;
-	try {
-		payload = JSON.parse(stdin);
-	} catch (e) {
-		exitWithError(`invalid JSON: ${e.message}`, 1);
+	if (parsed.flags.json) {
+		const stdin = readStdin().trim();
+		if (!stdin) exitWithError("--json requires JSON on stdin", 1);
+		try {
+			payload = JSON.parse(stdin);
+		} catch (e) {
+			exitWithError(`invalid JSON: ${e.message}`, 1);
+		}
 	}
-
-	// Flags given alongside --json still apply; JSON wins on conflict.
-	const fields = {};
-	const flagKeys = Object.keys(parsed.flags);
-	for (let i = 0; i < flagKeys.length; i++) {
-		if (flagKeys[i] !== "json") fields[flagKeys[i]] = parsed.flags[flagKeys[i]];
-	}
-	const payloadKeys = Object.keys(payload);
-	for (let j = 0; j < payloadKeys.length; j++) {
-		const key = payloadKeys[j];
-		fields[jsonKeyToFlag(key)] = payload[key];
-	}
-
-	return { source: "json", fields: fields, positionals: parsed.positionals };
+	return {
+		change: buildChange(parsed.flags, payload),
+		positionals: parsed.positionals,
+	};
 }
 
 // --- Usage ---
@@ -724,26 +926,105 @@ function cmdSelftest() {
 	);
 
 	check(
-		"jsonKeyToFlag maps a Contacts property",
-		jsonKeyToFlag("organization"),
-		"org",
-	);
-	check("jsonKeyToFlag maps an alias", jsonKeyToFlag("nameSuffix"), "suffix");
-	check(
-		"jsonKeyToFlag passes a collection key through",
-		jsonKeyToFlag("emails"),
-		"emails",
-	);
-
-	check(
 		"parseArgs separates flags from positionals",
-		parseArgs(["delete", "--force", "a1b2c3d4"], 1),
+		parseArgs(["delete", "--force", "a1b2c3d4"], 1, KNOWN_FLAGS.delete),
 		{ flags: { force: true }, positionals: ["a1b2c3d4"] },
 	);
 	check(
 		"parseArgs accumulates a repeatable flag",
-		parseArgs(["create", "--email", "a", "--email", "b"], 1),
+		parseArgs(
+			["create", "--email", "a", "--email", "b"],
+			1,
+			KNOWN_FLAGS.create,
+		),
 		{ flags: { email: ["a", "b"] }, positionals: [] },
+	);
+
+	// buildChange is pure, so the whole write-input mapping is checkable here.
+	// Before it existed, every one of these could only be reached by creating a
+	// real contact in the user's address book.
+	const change = (flags, payload) => buildChange(flags, payload);
+
+	check(
+		"buildChange keys scalars by Contacts property",
+		change({ first: "Ada", org: "Analytical" }).scalars,
+		{ firstName: "Ada", organization: "Analytical" },
+	);
+	check(
+		"buildChange parses a scalar date rather than passing the string on",
+		formatDate(change({ birthday: "1990-05-14" }).scalars.birthDate),
+		"1990-05-14",
+	);
+	check(
+		"buildChange appends for flag input",
+		change({ email: ["work:a@b.co"] }).collections.emails,
+		{ mode: "append", items: [{ label: "work", value: "a@b.co" }] },
+	);
+	check(
+		"buildChange replaces for payload input",
+		change({}, { emails: [{ label: "home", value: "c@d.co" }] }).collections
+			.emails,
+		{ mode: "replace", items: [{ label: "home", value: "c@d.co" }] },
+	);
+	check(
+		"buildChange lets --replace switch a flag collection to replace mode",
+		change({ replace: ["email"], email: ["work:a@b.co"] }).collections.emails,
+		{ mode: "replace", items: [{ label: "work", value: "a@b.co" }] },
+	);
+	check(
+		"buildChange accepts the plural spelling the README teaches",
+		change({ replace: ["emails"] }).collections.emails,
+		{ mode: "replace", items: [] },
+	);
+	// The four collections a payload used to parse and then silently discard,
+	// because their MULTI rows carried no json key to filter on.
+	check(
+		"buildChange writes the collections a payload used to drop",
+		Object.keys(
+			change(
+				{},
+				{
+					urls: [{ value: "https://example.com" }],
+					relatedNames: [{ value: "Ada" }],
+					customDates: [{ value: "2000-01-02" }],
+				},
+			).collections,
+		).sort(),
+		["customDates", "relatedNames", "urls"],
+	);
+	check(
+		"buildChange parses a payload date, not just a flag one",
+		formatDate(
+			change({}, { customDates: [{ value: "2000-01-02" }] }).collections
+				.customDates.items[0].value,
+		),
+		"2000-01-02",
+	);
+	// A repeated flag alongside --json used to be discarded entirely: cmdUpdate
+	// branched on which dialect the input came from and ran only that pipeline.
+	check(
+		"buildChange keeps flag items when a payload names the same collection",
+		change(
+			{ email: ["work:flag@b.co"] },
+			{ emails: [{ label: "home", value: "json@b.co" }] },
+		).collections.emails,
+		{
+			mode: "replace",
+			items: [
+				{ label: "home", value: "json@b.co" },
+				{ label: "work", value: "flag@b.co" },
+			],
+		},
+	);
+	check(
+		"buildChange defaults the note to replace mode",
+		change({ note: "text" }).note,
+		{ mode: "replace", text: "text" },
+	);
+	check(
+		"buildChange marks an appended note",
+		change({ "note-append": "more" }).note,
+		{ mode: "append", text: "more" },
 	);
 
 	check(
@@ -878,52 +1159,49 @@ function parseLabelValue(str, defaultLabel) {
 // The note is the field cx exists to reach — it is the whole reason for
 // choosing JXA over CNContactStore — and the one no other tool on the machine
 // backs up independently. Replacing a non-empty note echoes the previous text
-// to stderr so it survives in scrollback; --note-append adds to it instead.
+// to stderr so it survives in scrollback; append mode adds to it instead.
 // stdout is untouched, so anything parsing output is unaffected.
-function applyNote(person, fields) {
-	const append = fields["note-append"];
-	if (append !== undefined) {
+function applyNote(person, note) {
+	if (!note) return;
+	if (note.mode === "append") {
 		const existing = person.note() || "";
-		person.note = existing ? `${existing}\n${append}` : append;
+		person.note = existing ? `${existing}\n${note.text}` : note.text;
 		return;
 	}
-	if (fields.note === undefined) return;
 	const existing = person.note();
-	if (existing && existing !== fields.note) {
+	if (existing && existing !== note.text) {
 		writeStderr(`previous note for ${shortId(person.id())}:\n${existing}`);
 	}
-	person.note = fields.note;
+	person.note = note.text;
 }
 
-function applyScalarFields(person, fields) {
-	for (let i = 0; i < SCALARS.length; i++) {
-		const spec = SCALARS[i];
-		if (!spec.flag || spec.manual) continue;
-		if (fields[spec.flag] === undefined) continue;
-		person[spec.prop] =
-			spec.type === "date"
-				? parseDateFlag(fields[spec.flag], spec.flag)
-				: fields[spec.flag];
+// The change record is already keyed by Contacts property name and its dates
+// are already Date objects, so there is nothing left to decide here.
+function applyScalars(person, scalars) {
+	const props = Object.keys(scalars);
+	for (let i = 0; i < props.length; i++) {
+		person[props[i]] = scalars[props[i]];
 	}
 }
 
-// JSON supplies emails and phones as {label, value} objects where flag input
-// supplies "label:value" strings. Only JSON produces these keys.
-// --replace <field> empties a collection before the append pass. That is also
-// how a collection is cleared: --replace email with no --email leaves none.
-// It is the only operation that destroys data below the person level, so an
-// unknown field name is an error rather than a silent no-op.
-function clearReplacedCollections(app, person, fields) {
-	if (!fields.replace) return;
-	for (let i = 0; i < fields.replace.length; i++) {
-		const spec = multiSpecForFlag(fields.replace[i]);
-		if (!spec) {
-			exitWithError(
-				`--replace expects a repeatable field name, got: ${fields.replace[i]}`,
-				1,
+// The single collection writer. Both input dialects reach it through the same
+// record, so the mode says what to do rather than which parser produced it --
+// there used to be four writers over two disjoint key spaces, and which ones
+// ran depended on a source flag carried down from readInput.
+function applyCollections(app, person, collections) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		const change = collections[spec.coll];
+		if (!spec.ctor || !change) continue;
+		if (change.mode === "replace") clearCollection(app, person, spec);
+		for (let j = 0; j < change.items.length; j++) {
+			person[spec.coll].push(
+				app[spec.ctor]({
+					label: change.items[j].label,
+					value: change.items[j].value,
+				}),
 			);
 		}
-		clearCollection(app, person, spec);
 	}
 }
 
@@ -935,58 +1213,10 @@ function clearCollection(app, person, spec) {
 	}
 }
 
-// A JSON update replaces any collection its payload names, where flag input
-// appends unless told otherwise. Both semantics are now stated; before this,
-// JSON update silently ignored collections altogether.
-function replaceObjectCollections(app, person, fields) {
-	for (let i = 0; i < MULTI.length; i++) {
-		const spec = MULTI[i];
-		if (!spec.json || !fields[spec.json]) continue;
-		clearCollection(app, person, spec);
-	}
-	addObjectCollections(app, person, fields);
-}
-
-function addObjectCollections(app, person, fields) {
-	for (let i = 0; i < MULTI.length; i++) {
-		const spec = MULTI[i];
-		if (!spec.json || !fields[spec.json]) continue;
-		const items = fields[spec.json];
-		for (let j = 0; j < items.length; j++) {
-			person[spec.coll].push(
-				app[spec.ctor]({
-					label: items[j].label || spec.defaultLabel,
-					value: items[j].value,
-				}),
-			);
-		}
-	}
-}
-
-function addMultiValueFields(app, person, fields) {
-	for (let i = 0; i < MULTI.length; i++) {
-		const spec = MULTI[i];
-		if (!spec.flag || !fields[spec.flag]) continue;
-		const values = fields[spec.flag];
-		for (let j = 0; j < values.length; j++) {
-			const lv = parseLabelValue(values[j], spec.defaultLabel);
-			person[spec.coll].push(
-				app[spec.ctor]({
-					label: lv.label,
-					value:
-						spec.type === "date"
-							? parseDateFlag(lv.value, spec.flag)
-							: lv.value,
-				}),
-			);
-		}
-	}
-}
-
 // --- Commands ---
 
 function cmdList(args) {
-	const flags = parseArgs(args, 1).flags;
+	const flags = parseArgs(args, 1, KNOWN_FLAGS.list).flags;
 	const format = outputFormat(flags);
 	const app = getApp();
 
@@ -997,7 +1227,7 @@ function cmdList(args) {
 	printSummaries(readSummaries(collection), format);
 }
 function cmdSearch(args) {
-	const parsed = parseArgs(args, 1);
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.search);
 	const format = outputFormat(parsed.flags);
 	if (parsed.positionals.length === 0) {
 		exitWithError("usage: cx search <query>", 1);
@@ -1022,7 +1252,7 @@ function cmdSearch(args) {
 	printSummaries(summaries, format);
 }
 function cmdGet(args) {
-	const parsed = parseArgs(args, 1);
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.get);
 	const format = outputFormat(parsed.flags);
 	if (parsed.positionals.length === 0) exitWithError("usage: cx get <id>", 1);
 	const app = getApp();
@@ -1030,61 +1260,73 @@ function cmdGet(args) {
 	emit(format, record, () => formatCard(record));
 }
 function cmdCreate(args) {
-	const fields = readInput(args, 1).fields;
+	const change = readInput("create", args, 1).change;
 
-	if (!fields.first && !fields.last && !fields.org) {
+	const first = change.scalars.firstName;
+	const last = change.scalars.lastName;
+	const org = change.scalars.organization;
+	if (!first && !last && !org) {
 		exitWithError("create requires at least --first, --last or --org", 1);
 	}
 
 	const app = getApp();
-	validateFields(fields);
-	const targetGroup = fields.group ? resolveGroup(app, fields.group) : null;
+	const targetGroup = change.group ? resolveGroup(app, change.group) : null;
 
 	const personProps = {};
-	if (fields.first) personProps.firstName = fields.first;
-	if (fields.last) personProps.lastName = fields.last;
+	if (first) personProps.firstName = first;
+	if (last) personProps.lastName = last;
 	// Contacts models a business as a person record flagged as a company,
-	// displayed by organization rather than by name.
-	if (!fields.first && !fields.last) personProps.company = true;
+	// displayed by organization rather than by name. The organization goes in at
+	// push time rather than with the other scalars: until it lands the record has
+	// no name and no organization at all, so nothing can find it -- not a search,
+	// and not the test harness sweeping up after an interrupted run.
+	if (!first && !last) {
+		personProps.company = true;
+		personProps.organization = org;
+	}
 
 	const person = app.Person(personProps);
 	app.people.push(person);
 
-	applyScalarFields(person, fields);
-	applyNote(person, fields);
-	addMultiValueFields(app, person, fields);
-	addObjectCollections(app, person, fields);
+	applyScalars(person, change.scalars);
+	applyNote(person, change.note);
+	applyCollections(app, person, change.collections);
 
 	if (targetGroup) app.add(person, { to: targetGroup });
 
 	saveOrFail(app);
-	emitAction(outputFormat(fields), "created", person);
+	emitAction(change.format, "created", person);
 }
+
 function cmdUpdate(args) {
-	const input = readInput(args, 1);
+	const input = readInput("update", args, 1);
 	if (input.positionals.length === 0) {
 		exitWithError("usage: cx update <id> [--field value ...]", 1);
 	}
-	const app = getApp();
-	const person = resolveId(app, input.positionals[0]);
-	const fields = input.fields;
-
-	validateFields(fields);
-	applyScalarFields(person, fields);
-	applyNote(person, fields);
-
-	if (input.source === "flags") {
-		clearReplacedCollections(app, person, fields);
-		addMultiValueFields(app, person, fields);
-	} else {
-		replaceObjectCollections(app, person, fields);
+	const change = input.change;
+	// Otherwise a typo that parsed as nothing still reported "Updated <name>"
+	// and exit 0. Exit 0 now means something changed.
+	if (
+		Object.keys(change.scalars).length === 0 &&
+		!change.note &&
+		Object.keys(change.collections).length === 0
+	) {
+		exitWithError("update requires at least one field to change", 1);
 	}
 
+	const app = getApp();
+	const person = resolveId(app, input.positionals[0]);
+
+	applyScalars(person, change.scalars);
+	applyNote(person, change.note);
+	applyCollections(app, person, change.collections);
+
 	saveOrFail(app);
-	emitAction(outputFormat(fields), "updated", person);
+	emitAction(change.format, "updated", person);
 }
+
 function cmdDelete(args) {
-	const parsed = parseArgs(args, 1);
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.delete);
 	if (parsed.positionals.length === 0) {
 		exitWithError("usage: cx delete <id> [--force]", 1);
 	}
@@ -1119,7 +1361,7 @@ function cmdDelete(args) {
 	);
 }
 function cmdGroups(args) {
-	const parsed = parseArgs(args, 1);
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.groups);
 	if (parsed.positionals.length === 0) {
 		exitWithError("usage: cx groups <subcommand> [args]", 1);
 	}
