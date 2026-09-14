@@ -73,12 +73,20 @@ fi
 
 # --- Search ---
 # Runs after Create so that "hit" queries a contact this script owns. It used
-# to search the author's surname, which measured a miss on anyone else's Mac
-# and made the published hit/miss split meaningless.
+# to search the author's surname, which measured a miss on anyone else's Mac.
+#
+# All three rows should now print the same figure, and that equality is the
+# measurement. Search fetches every searchable property plurally and matches in
+# JavaScript, so the cost is the fetch: constant in the number of matches,
+# linear in the size of the address book. The hit/miss split used to mean the
+# opposite -- a miss was cheap because nothing was read back, and a broad query
+# was catastrophic because every hit was one Apple Event per property. The
+# broad row is here because it was the worst case: 267 of 340 contacts, 55s.
 echo ""
 echo "Search:"
 bench "search (hit)" "$CX" search "${TEST_PREFIX}"
 bench "search (miss)" "$CX" search zzzznonexistent
+bench "search (broad)" "$CX" search e
 
 # --- Get ---
 echo ""

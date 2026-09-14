@@ -126,6 +126,49 @@ function fit(str, len) {
 	return str.length >= len ? `${str.substring(0, len - 1)} ` : str.padEnd(len);
 }
 
+// The summary record every list-shaped command renders, and the one place its
+// three rules live: an unnamed contact reads "(no name)", a collection
+// contributes only its first value, and a missing scalar is "" rather than
+// null. readSummary, readSummaries and readSearchables all go through it, so
+// the rules cannot drift between the one-contact and bulk paths.
+function summaryRecord(id, name, org, emailValues, phoneValues) {
+	return {
+		id: id,
+		shortId: shortId(id),
+		name: name || "(no name)",
+		email: emailValues && emailValues.length > 0 ? emailValues[0] : "",
+		phone: phoneValues && phoneValues.length > 0 ? phoneValues[0] : "",
+		organization: org || "",
+	};
+}
+
+// Contacts' whose({_contains}) is case-insensitive and diacritic-sensitive:
+// "MARK" and "mark" both find Mark, and "Calderon" does not find "Calderón".
+// Lowercasing reproduces both, so moving the match into JavaScript changes
+// which fields are searched and nothing about how a string is compared.
+//
+// The falsy guard is the whole empty/null story: a null note (298 of 340
+// contacts here), an "" organization and an absent value all fall through
+// without a branch of their own.
+function matchesQuery(record, query) {
+	const needle = String(query).toLowerCase();
+	for (let i = 0; i < record.haystack.length; i++) {
+		const value = record.haystack[i];
+		if (value && value.toLowerCase().indexOf(needle) !== -1) return true;
+	}
+	return false;
+}
+
+// Hands back the summary and drops the haystack, so the search key cannot
+// reach stdout and --format json emits the six keys it always did.
+function filterSearch(records, query) {
+	const hits = [];
+	for (let i = 0; i < records.length; i++) {
+		if (matchesQuery(records[i], query)) hits.push(records[i].summary);
+	}
+	return hits;
+}
+
 function formatTable(summaries) {
 	if (summaries.length === 0) return "(no contacts)";
 
@@ -268,7 +311,7 @@ function usage() {
 		"",
 		"Commands:",
 		"  list [--group <name>]                    List contacts",
-		"  search <query>                           Search contacts",
+		"  search <query>                           Search name, org, email, phone, note",
 		"  get <id>                                 Show contact details",
 		"  create (--first|--last|--org) ... [opts] Create contact",
 		"  update <id> [opts]                       Update contact",
@@ -305,21 +348,21 @@ function usage() {
 // where it differs from the Contacts property name -- a SCALARS concept only;
 // a collection's payload key is always its coll.
 const SCALARS = [
-	{ prop: "name", display: "Name" },
-	{ flag: "first", prop: "firstName", display: "First" },
-	{ flag: "last", prop: "lastName", display: "Last" },
+	{ prop: "name", display: "Name", search: true },
+	{ flag: "first", prop: "firstName", display: "First", search: true },
+	{ flag: "last", prop: "lastName", display: "Last", search: true },
 	{ flag: "middle", prop: "middleName", display: "Middle" },
 	// namePrefix throws -1700 on some contacts; the read stays guarded.
 	{ prop: "namePrefix", display: "Prefix", guarded: true },
 	{ flag: "suffix", prop: "suffix", json: "nameSuffix", display: "Suffix" },
 	{ flag: "nickname", prop: "nickname", display: "Nickname" },
 	{ flag: "maiden", prop: "maidenName", display: "Maiden" },
-	{ flag: "org", prop: "organization", display: "Organization" },
+	{ flag: "org", prop: "organization", display: "Organization", search: true },
 	{ flag: "title", prop: "jobTitle", display: "Job Title" },
 	{ flag: "dept", prop: "department", display: "Department" },
 	{ flag: "birthday", prop: "birthDate", display: "Birthday", type: "date" },
 	// Handled by applyNote, not the generic setter — see there.
-	{ flag: "note", prop: "note", manual: true },
+	{ flag: "note", prop: "note", manual: true, search: true },
 ];
 
 // One row per repeatable field, read by the parser, the writer and the
@@ -335,6 +378,7 @@ const MULTI = [
 		ctor: "Email",
 		defaultLabel: "home",
 		display: "Email",
+		search: true,
 	},
 	{
 		flag: "phone",
@@ -342,6 +386,7 @@ const MULTI = [
 		ctor: "Phone",
 		defaultLabel: "home",
 		display: "Phone",
+		search: true,
 	},
 	{
 		flag: "url",
@@ -401,6 +446,28 @@ function multiSpecForPayloadKey(key) {
 		if (MULTI[i].ctor && key === MULTI[i].coll) return MULTI[i];
 	}
 	return null;
+}
+
+// The rows cx search looks at. A row carries search:true when its value is text
+// someone would plausibly type, AND when Contacts answers a plural fetch for
+// it. Both are required and neither is derivable, so the row says so rather
+// than a consumer inferring it.
+//
+// Not derived from ctor, tempting as that is. The two facts line up today by
+// coincidence: instantMessages has no ctor and no bulk .value(), but its
+// .userName() fetches fine, and addresses fetch via .formattedAddress(). On the
+// scalar side the stakes are higher -- app.people.namePrefix() throws -1728 for
+// the WHOLE array, not per contact, so readCard's guarded try/catch has no
+// plural equivalent and any rule that swept guarded rows in would kill search
+// outright. cmdSelftest asserts that it never happens.
+//
+// Each row is one more Apple Event: ~0.13s at 340 contacts.
+function searchRows(table) {
+	const rows = [];
+	for (let i = 0; i < table.length; i++) {
+		if (table[i].search) rows.push(table[i]);
+	}
+	return rows;
 }
 
 function flagsOf(table) {
@@ -735,35 +802,28 @@ function resolveId(app, idArg) {
 	return matches[0];
 }
 
+// One already-resolved person, at one Apple Event per property. Still the right
+// shape for cmdDelete's confirmation preview, where fetching the whole book
+// plurally to describe a single contact would be absurd.
 function readSummary(person) {
-	const name = person.name() || "(no name)";
-	let email = "";
-	let phone = "";
-	const org = person.organization() || "";
-
 	const emails = person.emails();
-	if (emails.length > 0) email = emails[0].value();
-
 	const phones = person.phones();
-	if (phones.length > 0) phone = phones[0].value();
-
-	return {
-		id: person.id(),
-		shortId: shortId(person.id()),
-		name: name,
-		email: email,
-		phone: phone,
-		organization: org,
-	};
+	return summaryRecord(
+		person.id(),
+		person.name(),
+		person.organization(),
+		emails.length > 0 ? [emails[0].value()] : [],
+		phones.length > 0 ? [phones[0].value()] : [],
+	);
 }
 
 // One Apple Event per property for a whole collection, instead of one per
 // contact per property. Measured at 341 contacts: five plural calls total
 // ~0.7s, against ~48s for the equivalent per-contact loop.
 //
-// Only valid on an element collection — app.people, or a group's people.
-// Plural access on a whose() specifier measured 13.3s for 256 names, worse
-// than the loop, so cmdSearch keeps readSummary.
+// Only valid on an element collection — app.people, or a group's people. Not
+// on a whose() specifier, where plural access measured 13.3s for 256 names,
+// worse than the per-contact loop.
 function readSummaries(collection) {
 	const ids = collection.id();
 	const names = collection.name();
@@ -785,16 +845,93 @@ function readSummaries(collection) {
 
 	const summaries = [];
 	for (let i = 0; i < ids.length; i++) {
-		summaries.push({
-			id: ids[i],
-			shortId: shortId(ids[i]),
-			name: names[i] || "(no name)",
-			email: emails[i] && emails[i].length > 0 ? emails[i][0] : "",
-			phone: phones[i] && phones[i].length > 0 ? phones[i][0] : "",
-			organization: orgs[i] || "",
-		});
+		summaries.push(
+			summaryRecord(ids[i], names[i], orgs[i], emails[i], phones[i]),
+		);
 	}
 	return summaries;
+}
+
+// Everything cx search matches on, fetched plurally, paired by index, and
+// handed over as plain data.
+//
+// Contacts cannot express a predicate over an element collection --
+// whose({emails: {value: {_contains: q}}}) throws "Object does not have
+// property emails" -- so for as long as the match happened server-side, emails,
+// phones and the note were unreachable. They fetch in bulk perfectly well
+// (emails 128ms, phones 133ms for 340 contacts), which is why the match moved
+// here: not queryable, but readable.
+//
+// Strictly more expensive than readSummaries -- eight events against five,
+// 1.15s against 0.79s -- so cmdList keeps the cheaper one rather than both
+// sharing this and paying for three properties no table renders.
+function readSearchables(collection) {
+	// name, organization, emails and phones are wanted by both the table and
+	// the match set. Memoise so the overlap costs one Apple Event, not two.
+	const columns = {};
+	const fetch = (key, get) => {
+		if (!columns[key]) columns[key] = get();
+		return columns[key];
+	};
+
+	const ids = fetch("id", () => collection.id());
+
+	const scalarRows = searchRows(SCALARS);
+	for (let i = 0; i < scalarRows.length; i++) {
+		const prop = scalarRows[i].prop;
+		fetch(prop, () => collection[prop]());
+	}
+	const multiRows = searchRows(MULTI);
+	for (let k = 0; k < multiRows.length; k++) {
+		const coll = multiRows[k].coll;
+		fetch(coll, () => collection[coll].value());
+	}
+
+	// The five the table renders, searchable or not.
+	const names = fetch("name", () => collection.name());
+	const orgs = fetch("organization", () => collection.organization());
+	const emails = fetch("emails", () => collection.emails.value());
+	const phones = fetch("phones", () => collection.phones.value());
+
+	// Separate events paired by index, as in readSummaries. With eight the
+	// window in which Contacts could change under us is wider, so name the
+	// property that disagreed rather than reporting a bare mismatch.
+	const keys = Object.keys(columns);
+	for (let c = 0; c < keys.length; c++) {
+		if (columns[keys[c]].length !== ids.length) {
+			exitWithError(
+				`Contacts returned ${columns[keys[c]].length} values for ${keys[c]} and ${ids.length} ids`,
+				1,
+			);
+		}
+	}
+
+	const records = [];
+	for (let i = 0; i < ids.length; i++) {
+		const haystack = [];
+		for (let x = 0; x < scalarRows.length; x++) {
+			haystack.push(columns[scalarRows[x].prop][i]);
+		}
+		for (let k = 0; k < multiRows.length; k++) {
+			const spec = multiRows[k];
+			const values = columns[spec.coll][i];
+			for (let v = 0; v < values.length; v++) {
+				// The catalogue's date test, same as readCard's. customDates is
+				// the one collection whose .value() yields Date objects, so
+				// routing through it now keeps "adding a field is one row" true
+				// if that row is ever marked searchable.
+				const raw = values[v];
+				haystack.push(raw && spec.type === "date" ? formatDate(raw) : raw);
+			}
+		}
+		records.push({
+			// Values only, never labels: `cx search work` must not return every
+			// contact that happens to have a work email.
+			summary: summaryRecord(ids[i], names[i], orgs[i], emails[i], phones[i]),
+			haystack: haystack,
+		});
+	}
+	return records;
 }
 
 // Reading and rendering are separate: readCard turns a live Contacts object
@@ -1153,6 +1290,154 @@ function cmdSelftest() {
 	);
 
 	check(
+		"summaryRecord names an unnamed contact",
+		summaryRecord("A1B2C3D4-0000:ABPerson", null, null, [], []),
+		{
+			id: "A1B2C3D4-0000:ABPerson",
+			shortId: "A1B2C3D4",
+			name: "(no name)",
+			email: "",
+			phone: "",
+			organization: "",
+		},
+	);
+	check(
+		"summaryRecord takes the first of each collection",
+		summaryRecord(
+			"A1B2C3D4-0000:ABPerson",
+			"Ada",
+			"Acme",
+			["a@b.co", "c@d.co"],
+			["555", "666"],
+		),
+		{
+			id: "A1B2C3D4-0000:ABPerson",
+			shortId: "A1B2C3D4",
+			name: "Ada",
+			email: "a@b.co",
+			phone: "555",
+			organization: "Acme",
+		},
+	);
+
+	// The record readSearchables produces, written out once. The haystack is
+	// values only, in catalogue order: name, firstName, lastName, organization,
+	// note, then every email and every phone.
+	const searchable = {
+		summary: {
+			id: "A1B2C3D4-0000:ABPerson",
+			shortId: "A1B2C3D4",
+			name: "Ada Lovelace",
+			email: "ada@analytical.example",
+			phone: "555-0100",
+			organization: "Analytical Engines",
+		},
+		haystack: [
+			"Ada Lovelace",
+			"Ada",
+			"Lovelace",
+			"Analytical Engines",
+			null,
+			"ada@analytical.example",
+			"ada@home.example",
+			"555-0100",
+		],
+	};
+
+	check(
+		"matchesQuery finds a substring",
+		matchesQuery(searchable, "Lovel"),
+		true,
+	);
+	check(
+		"matchesQuery ignores case, as whose({_contains}) did",
+		matchesQuery(searchable, "LOVELACE"),
+		true,
+	);
+	check(
+		"matchesQuery does not fold diacritics, as whose({_contains}) did not",
+		matchesQuery({ haystack: ["Marissa Calderón"] }, "Calderon"),
+		false,
+	);
+	// The three surfaces no whose() specifier could reach.
+	check(
+		"matchesQuery searches an email address",
+		matchesQuery(searchable, "analytical.example"),
+		true,
+	);
+	check(
+		"matchesQuery searches a phone number",
+		matchesQuery(searchable, "555-0100"),
+		true,
+	);
+	check(
+		"matchesQuery searches the note",
+		matchesQuery(
+			{ haystack: [null, "lent them the difference engine"] },
+			"difference",
+		),
+		true,
+	);
+	// readSummary kept only the first of each collection, so even a widened
+	// whose() would have missed this one.
+	check(
+		"matchesQuery searches past the first item of a collection",
+		matchesQuery(searchable, "ada@home"),
+		true,
+	);
+	check(
+		"matchesQuery steps over a null note rather than throwing",
+		matchesQuery({ haystack: [null, "Ada"] }, "Ada"),
+		true,
+	);
+	check(
+		"matchesQuery misses an all-null haystack",
+		matchesQuery({ haystack: [null] }, "a"),
+		false,
+	);
+	check(
+		"matchesQuery misses an empty haystack",
+		matchesQuery({ haystack: [] }, "a"),
+		false,
+	);
+	check(
+		"matchesQuery misses when nothing contains the query",
+		matchesQuery(searchable, "Babbage"),
+		false,
+	);
+	// What whose({_contains: ""}) did, pinned so it is a decision not a surprise.
+	check(
+		"matchesQuery treats an empty query as matching anything non-empty",
+		matchesQuery(searchable, ""),
+		true,
+	);
+
+	// The boundary: what leaves filterSearch is what printSummaries renders and
+	// --format json serialises. A haystack key here is a leak into stdout.
+	check(
+		"filterSearch returns summaries, not search records",
+		filterSearch([searchable], "Ada"),
+		[searchable.summary],
+	);
+	check("filterSearch drops a miss", filterSearch([searchable], "Babbage"), []);
+
+	// A plural fetch of a guarded property throws -1728 for the whole array, so
+	// there is nothing for a try/catch to guard: the row must never be
+	// searchable, or cx search dies on every query for everyone.
+	check(
+		"no guarded field is searchable",
+		searchRows(SCALARS)
+			.filter((spec) => spec.guarded)
+			.map((spec) => spec.prop),
+		[],
+	);
+	check(
+		"searchRows reads the catalogue rather than a hard-coded list",
+		searchRows(MULTI).map((spec) => spec.coll),
+		["emails", "phones"],
+	);
+
+	check(
 		"formatTable reports an empty result",
 		formatTable([]),
 		"(no contacts)",
@@ -1226,24 +1511,22 @@ function cmdSearch(args) {
 	if (parsed.positionals.length === 0) {
 		exitWithError("usage: cx search <query>", 1);
 	}
+	// Only the first positional is read. Multi-term AND matching is the
+	// mitigation if `cx search gmail` proves too noisy now that email domains
+	// are matched -- parseArgs already collects the rest.
 	const query = parsed.positionals[0];
+
+	// This used to be one whose() disjunction over four name/organization
+	// properties, then a readSummary per hit. Both halves were problems: emails,
+	// phones and the note could not be reached by any specifier Contacts
+	// accepts, and `cx search a` matched 267 of 340 contacts at one Apple Event
+	// per property per hit -- measured at 55 seconds.
+	//
+	// Fetching plurally and matching here costs the same whether the query hits
+	// nothing or everything. It is constant in the number of matches and linear
+	// in the size of the address book, where it used to be the other way round.
 	const app = getApp();
-
-	const people = app.people.whose({
-		_or: [
-			{ firstName: { _contains: query } },
-			{ lastName: { _contains: query } },
-			{ name: { _contains: query } },
-			{ organization: { _contains: query } },
-		],
-	})();
-
-	const summaries = [];
-	for (let i = 0; i < people.length; i++) {
-		summaries.push(readSummary(people[i]));
-	}
-
-	printSummaries(summaries, format);
+	printSummaries(filterSearch(readSearchables(app.people), query), format);
 }
 
 function cmdGet(args) {
