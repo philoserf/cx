@@ -1,0 +1,10 @@
+# Profile for the release-gate skill (~/.claude/skills/release-gate).
+# Sourced as shell from the repo root; see that script's header for the contract.
+#
+# cx has no package.json and no build step, so the gate cannot detect where the
+# version lives. It lives in exactly one place — the VERSION constant that
+# `cx --version` prints — and the cross-check below asserts that the literal is
+# still in the file a human would edit. The Taskfile supplies the test command;
+# deps, build and audit rows skip, which is accurate rather than unprofiled.
+VERSION_CMD="./cx --version"
+VERSION_FILES="cx.js:grep"
