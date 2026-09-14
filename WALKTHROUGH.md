@@ -1115,14 +1115,13 @@ function saveOrFail(app) {
 }
 ```
 
-What `save` actually does is worth getting right, because the repository's other
-documents disagree about it and the answer decides whether the ordering rules
-above are load-bearing. Measured, not inferred: push a person and exit without
-saving, and a **separate process** finds the contact. Quit Contacts.app and it
-is gone. So a mutation goes live in the running app the moment it is made, and
-`save` is what persists it to disk. Neither "it persists" nor "it is lost" is
-true on its own, and `CLAUDE.md` and `THEORY.md` currently state the second.
-That is issue #13.
+What `save` actually does is worth getting right, because the answer decides
+whether the ordering rules above are load-bearing. Measured, not inferred: push a
+person and exit without saving, and a **separate process** finds the contact.
+Quit Contacts.app and it is gone. So a mutation goes live in the running app the
+moment it is made, and `save` is what persists it to disk. Neither "it persists"
+nor "it is lost" is true on its own, and for a while this repository asserted
+both, in different files, without flagging it.
 
 The consequence is the ordering rule: a failure between `push` and `save` leaves
 a real, findable, half-built contact for the life of the Contacts process.

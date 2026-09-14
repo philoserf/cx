@@ -184,9 +184,9 @@ would swallow an exit 4 and leave the contact it was there to remove.
   disk.** This was measured, because it decides whether the ordering rules below are
   correctness machinery or tidiness: push a person and exit without saving, and a _separate
   process_ finds the contact; quit Contacts.app and it is gone. Neither "an unsaved change
-  persists" nor "an unsaved change is lost" is true on its own, and both are currently
-  asserted in different places in this repository — see issue #13, which is the last thing
-  keeping the documents from agreeing. The practical consequence: a failure between the
+  persists" nor "an unsaved change is lost" is true on its own, and for a while this
+  repository asserted both, in different files, without flagging it (issue #13). The
+  practical consequence: a failure between the
   push and the save strands a real, findable, half-built contact for the life of the
   Contacts process, which on a normal Mac means until reboot.
 - **Nothing that can fail may run after `app.people.push`.** This follows from the previous
@@ -361,8 +361,6 @@ find three bugs in one place, look for the one bug underneath them.**
 
 Open questions this theory points at, tracked as issues rather than restated here:
 
-- **#13** — the last document disagreement about what `save` does. Until it closes,
-  `CLAUDE.md` and this file's account of the push/save window differ.
 - **#25** — `readCard` decides "is this a date" two ways, one of which ignores the
   catalogue. The clearest live counter-example to the single-definition premise.
 - **#29** — `parseLabelValue`'s four-scheme allowlist, the only ambiguous grammar `cx`
