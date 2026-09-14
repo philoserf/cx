@@ -5,25 +5,52 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CX="$SCRIPT_DIR/../cx"
 PASS=0
 FAIL=0
-TEST_PREFIX="CxTest_$$"
-CREATED_IDS=()
-CREATED_GROUPS=()
+# The trailing underscore matters: the sweep matches with _contains, so a
+# bare pid prefix would also match a longer pid's run -- CxTest_1045 would
+# sweep a concurrent CxTest_10450 suite's contacts out from under it.
+TEST_PREFIX="CxTest_${$}_"
 
+# Cleanup asks Contacts what exists under our prefix rather than replaying a
+# list built as we went. Registering an ID after the create that produced it
+# leaves a window -- a failed extraction aborts the script under set -e with
+# nothing registered -- and a create that fails never returns an ID at all.
+# The prefix is known before the first create, so it cannot be outrun.
+#
+# Every sweep is wrapped in `|| true`, and that is load-bearing rather than
+# defensive: under set -e a failing command inside an EXIT trap aborts the rest
+# of the trap, so an unguarded contact sweep would skip the groups entirely.
 cleanup() {
+	local status=$?
 	echo ""
 	echo "--- Cleanup ---"
-	# bash 3.2 (stock macOS /bin/bash) errors on "${arr[@]}" for an empty
-	# array under set -u, and both arrays are emptied on a successful run.
-	if [[ ${#CREATED_IDS[@]} -gt 0 ]]; then
-		for id in "${CREATED_IDS[@]}"; do
-			"$CX" delete "$id" --force 2>/dev/null || true
-		done
+	# Delete by full id, never the short one: resolveId matches on a prefix and
+	# exits 4 when it is ambiguous, which `|| true` would swallow -- silently
+	# leaking the contact this sweep exists to remove.
+	{
+		"$CX" search "$TEST_PREFIX" --format json |
+			/usr/bin/jq -r '.[].id' |
+			while read -r id; do
+				"$CX" delete "$id" --force 2>/dev/null || true
+			done
+	} || true
+	# groups list emits a bare array of names, so the prefix match is ours to
+	# make; read a whole line, since a group name may contain spaces.
+	{
+		"$CX" groups list --format json |
+			/usr/bin/jq -r --arg p "$TEST_PREFIX" '.[] | select(startswith($p))' |
+			while IFS= read -r group; do
+				"$CX" groups delete "$group" --force 2>/dev/null || true
+			done
+	} || true
+	# Say so rather than exiting quietly: a sweep that could not run is the
+	# failure this whole mechanism exists to prevent.
+	local left
+	left=$("$CX" search "$TEST_PREFIX" --format json 2>/dev/null |
+		/usr/bin/jq -r "length" 2>/dev/null) || left=""
+	if [[ "${left:-0}" != "0" ]]; then
+		echo "  WARNING: ${left:-?} contact(s) matching $TEST_PREFIX remain"
 	fi
-	if [[ ${#CREATED_GROUPS[@]} -gt 0 ]]; then
-		for group in "${CREATED_GROUPS[@]}"; do
-			"$CX" groups delete "$group" --force 2>/dev/null || true
-		done
-	fi
+	return $status
 }
 trap cleanup EXIT
 
@@ -96,14 +123,14 @@ assert_contains "cx " "$output"
 # --- Test: create ---
 echo ""
 echo "=== Create ==="
-output=$("$CX" create --first "${TEST_PREFIX}" --last "Person" --note "test note from cx" --email "work:${TEST_PREFIX}@example.com" --phone "mobile:555-0199" 2>&1)
+output=$("$CX" create --first "${TEST_PREFIX}" --last "Person" --note "test note from cx" --email "work:${TEST_PREFIX}@example.com" --phone "mobile:555-0199" --format json 2>&1)
 echo "$output"
-assert_contains "Created" "$output"
+assert_json "$output"
+assert_contains '"action": "created"' "$output"
 
 # Extract short ID
-CONTACT_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+CONTACT_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 echo "  Contact ID: $CONTACT_ID"
-CREATED_IDS+=("$CONTACT_ID")
 
 # --- Test: search ---
 echo ""
@@ -122,7 +149,10 @@ assert_contains "555-0199" "$output"
 # --- Test: update ---
 echo ""
 echo "=== Update ==="
-"$CX" update "$CONTACT_ID" --note "updated note from cx"
+# The only coverage of emitAction's text output: every create in this suite
+# now runs --format json so the id can be read without parsing a rendered line.
+output=$("$CX" update "$CONTACT_ID" --note "updated note from cx" 2>&1)
+assert_contains "Updated" "$output"
 output=$("$CX" get "$CONTACT_ID" 2>&1)
 assert_contains "updated note from cx" "$output"
 assert_not_contains "test note from cx" "$output"
@@ -139,8 +169,7 @@ assert_contains "${TEST_PREFIX}" "$output"
 # --- Test: groups lifecycle ---
 echo ""
 echo "=== Groups ==="
-GROUP_NAME="${TEST_PREFIX}_Group"
-CREATED_GROUPS+=("$GROUP_NAME")
+GROUP_NAME="${TEST_PREFIX}Group"
 
 "$CX" groups create "$GROUP_NAME"
 output=$("$CX" groups list 2>&1)
@@ -161,13 +190,11 @@ assert_not_contains "${TEST_PREFIX}" "$output"
 "$CX" groups delete "$GROUP_NAME" --force
 output=$("$CX" groups list 2>&1)
 assert_not_contains "$GROUP_NAME" "$output"
-CREATED_GROUPS=()
 
 # --- Test: delete with --force ---
 echo ""
 echo "=== Delete (force) ==="
 "$CX" delete "$CONTACT_ID" --force
-CREATED_IDS=()
 
 output=$("$CX" search "${TEST_PREFIX}" 2>&1)
 assert_not_contains "${TEST_PREFIX}" "$output"
@@ -176,13 +203,13 @@ assert_not_contains "${TEST_PREFIX}" "$output"
 echo ""
 echo "=== Create (JSON) ==="
 JSON_PREFIX="${TEST_PREFIX}J"
-output=$(printf '{"firstName":"%s","lastName":"Person","note":"json note from cx","jobTitle":"Drafter","emails":[{"label":"work","value":"%s@example.com"}],"phones":[{"label":"mobile","value":"555-0142"}]}' "$JSON_PREFIX" "$JSON_PREFIX" | "$CX" create --json 2>&1)
+output=$(printf '{"firstName":"%s","lastName":"Person","note":"json note from cx","jobTitle":"Drafter","emails":[{"label":"work","value":"%s@example.com"}],"phones":[{"label":"mobile","value":"555-0142"}]}' "$JSON_PREFIX" "$JSON_PREFIX" | "$CX" create --json --format json 2>&1)
 echo "$output"
-assert_contains "Created" "$output"
+assert_json "$output"
+assert_contains '"action": "created"' "$output"
 
-JSON_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
+JSON_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 echo "  Contact ID: $JSON_ID"
-CREATED_IDS+=("$JSON_ID")
 
 output=$("$CX" get "$JSON_ID" 2>&1)
 assert_contains "json note from cx" "$output"
@@ -214,15 +241,13 @@ assert_contains "${JSON_PREFIX}" "$output"
 # --- Test: create with --group ---
 echo ""
 echo "=== Create (--group) ==="
-CGROUP_NAME="${TEST_PREFIX}_CGroup"
+CGROUP_NAME="${TEST_PREFIX}CGroup"
 "$CX" groups create "$CGROUP_NAME"
-CREATED_GROUPS+=("$CGROUP_NAME")
 
 FLAG_PREFIX="${TEST_PREFIX}F"
 output=$("$CX" create --first "${FLAG_PREFIX}" --last "Person" --group "$CGROUP_NAME" 2>&1)
 echo "$output"
-FLAG_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$FLAG_ID")
+assert_contains "Created" "$output"
 
 output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
 assert_contains "${FLAG_PREFIX}" "$output"
@@ -233,8 +258,7 @@ assert_contains "${FLAG_PREFIX}" "$output"
 JGROUP_PREFIX="${TEST_PREFIX}JG"
 output=$(printf '{"firstName":"%s","lastName":"Person"}' "$JGROUP_PREFIX" | "$CX" create --json --group "$CGROUP_NAME" 2>&1)
 echo "$output"
-JGROUP_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$JGROUP_ID")
+assert_contains "Created" "$output"
 
 output=$("$CX" groups members "$CGROUP_NAME" 2>&1)
 assert_contains "${JGROUP_PREFIX}" "$output"
@@ -245,10 +269,9 @@ assert_contains "${JGROUP_PREFIX}" "$output"
 echo ""
 echo "=== Multi-value fields ==="
 MULTI_PREFIX="${TEST_PREFIX}M"
-output=$("$CX" create --first "${MULTI_PREFIX}" --last "Person" --email "work:${MULTI_PREFIX}@example.com" --phone "mobile:555-0175" --url "homepage:https://example.com/${MULTI_PREFIX}" --related "friend:Some Friend" --date "anniversary:2011-07-08" 2>&1)
+output=$("$CX" create --first "${MULTI_PREFIX}" --last "Person" --email "work:${MULTI_PREFIX}@example.com" --phone "mobile:555-0175" --url "homepage:https://example.com/${MULTI_PREFIX}" --related "friend:Some Friend" --date "anniversary:2011-07-08" --format json 2>&1)
 echo "$output"
-MULTI_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$MULTI_ID")
+MULTI_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 output=$("$CX" get "$MULTI_ID" 2>&1)
 assert_contains "${MULTI_PREFIX}@example.com" "$output"
@@ -265,10 +288,9 @@ assert_contains "2011-07-08" "$output"
 echo ""
 echo "=== Dates ==="
 DATE_PREFIX="${TEST_PREFIX}D"
-output=$("$CX" create --first "${DATE_PREFIX}" --last "Person" --birthday 1990-05-14 --date "anniversary:2000-01-02" 2>&1)
+output=$("$CX" create --first "${DATE_PREFIX}" --last "Person" --birthday 1990-05-14 --date "anniversary:2000-01-02" --format json 2>&1)
 echo "$output"
-DATE_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$DATE_ID")
+DATE_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 output=$("$CX" get "$DATE_ID" 2>&1)
 assert_contains "1990-05-14" "$output"
@@ -303,13 +325,10 @@ assert_not_contains "${VAL_PREFIX}" "$output"
 echo ""
 echo "=== Flag before positional ==="
 ORDER_PREFIX="${TEST_PREFIX}O"
-output=$("$CX" create --first "${ORDER_PREFIX}" --last "Person" 2>&1)
-ORDER_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$ORDER_ID")
+output=$("$CX" create --first "${ORDER_PREFIX}" --last "Person" --format json 2>&1)
+ORDER_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 "$CX" delete --force "$ORDER_ID"
-# Left in CREATED_IDS deliberately: cleanup tolerates an already-deleted ID,
-# and removing an element from a bash array is not worth the noise.
 output=$("$CX" search "${ORDER_PREFIX}" 2>&1)
 assert_not_contains "${ORDER_PREFIX}" "$output"
 
@@ -317,9 +336,8 @@ assert_not_contains "${ORDER_PREFIX}" "$output"
 echo ""
 echo "=== Note protection ==="
 NOTE_PREFIX="${TEST_PREFIX}N"
-output=$("$CX" create --first "${NOTE_PREFIX}" --last "Person" --note "original note" 2>&1)
-NOTE_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$NOTE_ID")
+output=$("$CX" create --first "${NOTE_PREFIX}" --last "Person" --note "original note" --format json 2>&1)
+NOTE_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 # The replaced note goes to stderr, never stdout.
 output=$("$CX" update "$NOTE_ID" --note "replacement note" 2>/dev/null)
@@ -336,9 +354,8 @@ assert_contains "appended line" "$output"
 echo ""
 echo "=== Replace ==="
 REP_PREFIX="${TEST_PREFIX}R"
-output=$("$CX" create --first "${REP_PREFIX}" --last "Person" --email "work:${REP_PREFIX}a@example.com" --email "home:${REP_PREFIX}b@example.com" 2>&1)
-REP_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$REP_ID")
+output=$("$CX" create --first "${REP_PREFIX}" --last "Person" --email "work:${REP_PREFIX}a@example.com" --email "home:${REP_PREFIX}b@example.com" --format json 2>&1)
+REP_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 "$CX" update "$REP_ID" --replace email --email "work:${REP_PREFIX}c@example.com"
 output=$("$CX" get "$REP_ID" 2>&1)
@@ -358,11 +375,11 @@ assert_exit 1 "$CX" update "$REP_ID" --replace bogusfield
 echo ""
 echo "=== Company contact ==="
 ORG_PREFIX="${TEST_PREFIX}Co"
-output=$("$CX" create --org "${ORG_PREFIX} Industries" --phone "work:555-0188" 2>&1)
+output=$("$CX" create --org "${ORG_PREFIX} Industries" --phone "work:555-0188" --format json 2>&1)
 echo "$output"
-assert_contains "Created" "$output"
-ORG_ID=$(echo "$output" | grep -o '([a-fA-F0-9]\{8\})' | tr -d '()')
-CREATED_IDS+=("$ORG_ID")
+assert_json "$output"
+assert_contains '"action": "created"' "$output"
+ORG_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 output=$("$CX" get "$ORG_ID" 2>&1)
 assert_contains "${ORG_PREFIX} Industries" "$output"
@@ -376,8 +393,7 @@ FMT_PREFIX="${TEST_PREFIX}Fmt"
 output=$("$CX" create --first "${FMT_PREFIX}" --last "Person" --email "work:${FMT_PREFIX}@example.com" --format json 2>&1)
 assert_json "$output"
 assert_contains '"action": "created"' "$output"
-FMT_ID=$(echo "$output" | grep -o '[A-F0-9]\{8\}' | head -1)
-CREATED_IDS+=("$FMT_ID")
+FMT_ID=$(echo "$output" | /usr/bin/jq -r .shortId)
 
 assert_json "$("$CX" get "$FMT_ID" --format json 2>&1)"
 assert_json "$("$CX" search "${FMT_PREFIX}" --format json 2>&1)"
