@@ -52,7 +52,7 @@ order a card renders them. The parser, the flag allowlist, the writers, the
 renderers and the usage text all read them. **Adding a field is one row** — do
 not add a case to any consumer; if you want to, the row is missing a key.
 
-Two keys are easy to get wrong:
+Three keys are easy to get wrong:
 
 - **`ctor` on `MULTI` is the writable test.** It is present on every row `cx` can
   construct and absent only on `instantMessages`. Writers filter on it. Do not
@@ -61,6 +61,12 @@ Two keys are easy to get wrong:
 - **`json` is a `SCALARS` concept only**, naming a payload key where it differs
   from the Contacts property. Exactly one row needs it (`suffix` / `nameSuffix`).
   A collection's payload key is always its `coll`.
+- **`search` is the searchable test**, on both catalogues, read by `searchRows`.
+  It is not derived from `ctor` and must not be: a row is searchable when its
+  value is text someone would type **and** Contacts answers a plural fetch for
+  it, and neither is derivable. Each row added is one more Apple Event (~0.13s
+  at 340 contacts), and a `guarded` row marked searchable breaks every query —
+  see the gotchas.
 
 ### The change record
 
@@ -103,7 +109,7 @@ that produces output accepts `--format json`.
 
 ```bash
 cx list [--group <name>]
-cx search <query>
+cx search <query>                       # name, org, note, every email, every phone
 cx get <id>
 cx create (--first|--last|--org) <name> [--email label:addr] [--note text] [--group <name>] ...
 cx create --json                        # reads JSON from stdin
@@ -130,7 +136,9 @@ these two semantics were not, and unifying them breaks one of two workflows.
 - **`app.add(person, {to: group})`** is required for group membership. `group.people.push()` throws error -1701.
 - **A mutation goes live in the running app as it is made; `save` persists it to disk.** Measured: push a person without saving and a _separate process_ finds it; quit Contacts.app and it is gone. So a failure between the push and `saveOrFail(app)` strands a real, findable, half-built contact for the life of the Contacts process. That is why **nothing that can fail may run after `app.people.push`** — validation lives in `buildChange`, and the three writers contain no `exitWithError` between them. Keep it that way.
 - **Contacts validates nothing.** `--email "work:))))"` is accepted and stored. `cx` type-checks input and value-checks exactly one thing, dates. A write that succeeded was inspected by nobody else.
-- **Plural access is the difference between 0.8s and 47s.** `app.people.id()` fetches every id in one Apple Event; a loop calling `person.id()` costs one event each. This works on `app.people` and on a group's people, but **not** on a `whose()` specifier — measured at 13.3s for 256 names, worse than the loop. That is why `cmdSearch` still uses the per-contact `readSummary`.
+- **Plural access is the difference between 0.8s and 47s.** `app.people.id()` fetches every id in one Apple Event; a loop calling `person.id()` costs one event each. This works on `app.people` and on a group's people, but **not** on a `whose()` specifier — measured at 13.3s for 256 names, worse than the loop.
+- **Contacts cannot express a predicate over an element collection.** `whose({note: {_contains: q}})` works; `whose({emails: {value: {_contains: q}}})` throws `Object does not have property "emails"`. That is why `cmdSearch` does not use `whose()` at all: it fetches every searchable property plurally and matches in JavaScript, which costs the same on 0 hits as on 286. A nested collection *fetch* is fine — `app.people.emails.value()` returns all 340 nested arrays in one event.
+- **A plural fetch of a `guarded` property throws for the whole array.** `app.people.namePrefix()` throws `-1728` outright, where `readCard`'s per-contact try/catch copes. So a `guarded` row must never carry `search: true` — `cx selftest` asserts it never does.
 - **Read a deleted object and JXA throws `-1728`.** Capture what you need before `app.delete`.
 - **Dates are date-only values stored at noon local time.** `new Date("1990-05-14")` parses as UTC midnight, which is the previous day west of Greenwich. Always go through `parseDateFlag` and `formatDate`.
 - **Phone and email labels** come back wrapped as `_$!<Mobile>!$_`; `unwrapLabel` strips that.

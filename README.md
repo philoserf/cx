@@ -14,7 +14,7 @@ This symlinks `cx` to `~/.local/bin/cx`.
 
 ```text
 cx list [--group <name>]              List contacts
-cx search <query>                     Search contacts
+cx search <query>                     Search names, orgs, emails, phones, notes
 cx get <id>                           Show contact details
 cx create (--first|--last|--org) ...  Create contact
 cx update <id> [--field value ...]    Update contact
@@ -68,6 +68,20 @@ one is rejected rather than silently dropped. Contacts models an address as a
 record of street, city, state, zip and country rather than the `label`/`value`
 pair every writable collection uses, so it needs a shape `cx` does not have.
 
+### Search
+
+`cx search` matches, case-insensitively, against the name, first and last name,
+organization, note, **every** email address and **every** phone number — not
+just the first of each. Labels are not matched, so `cx search work` does not
+return every contact with a work email.
+
+Accents count: `Calderon` does not find `Calderón`. That is Contacts' own
+behaviour, kept deliberately so the match rule did not change when the
+implementation did.
+
+Addresses, social profiles and instant messages are not searched, and neither
+are urls, related names or custom dates.
+
 ### The note
 
 The note is the field this tool exists to reach, and it has no undo. Replacing a
@@ -110,26 +124,33 @@ Benchmarks with 340 contacts (2026-09-14, Apple M4):
 
 | Command        | Time  |
 | -------------- | ----- |
-| list           | 0.76s |
-| search (hit)   | 0.85s |
-| search (miss)  | 0.51s |
-| create         | 0.97s |
-| get            | 0.92s |
-| update         | 0.58s |
-| delete         | 0.92s |
-| groups create  | 0.37s |
+| list (cold)    | 0.85s |
+| list (warm)    | 0.79s |
+| create         | 1.06s |
+| search (hit)   | 1.14s |
+| search (miss)  | 1.16s |
+| search (broad) | 1.11s |
+| get            | 0.95s |
+| update         | 0.53s |
+| delete         | 1.03s |
+| groups create  | 0.43s |
 | groups list    | 0.22s |
-| groups add     | 1.39s |
-| groups members | 0.35s |
-| groups remove  | 1.13s |
-| groups delete  | 0.34s |
+| groups add     | 1.35s |
+| groups members | 0.36s |
+| groups remove  | 1.30s |
+| groups delete  | 0.29s |
 
-Nothing is above 1.4s, and roughly half of each figure is `osascript` startup.
-Earlier versions took 47s for `list` and ~10s for every command that resolved a
-short ID, because each contact property was a separate Apple Event. Both paths
-now ask Contacts for a whole collection at once. Run `task bench` to regenerate. The
-hit row queries a contact the benchmark creates and the miss row a string that
-matches nothing, so the split means the same thing on any machine.
+Every command is a handful of Apple Events rather than one per contact per
+property, so the figures track the size of the address book and not the size of
+the result. Earlier versions took 47s for `list`, ~10s for every command that
+resolved a short ID, and 55s for a search matching most of the book.
+
+The three search rows are the same figure on purpose, and that equality is the
+measurement: a hit, a miss and a query matching 286 of 340 contacts all cost
+what the fetch costs. Search is constant in the number of matches and linear in
+the size of the address book; it used to be the other way round.
+
+Run `task bench` to regenerate.
 
 ## Development
 
