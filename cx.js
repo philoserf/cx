@@ -1099,7 +1099,320 @@ function readInput(command, args, startIndex) {
 	};
 }
 
-// Everything below the read/render boundary is a pure function of plain data,
+function cmdList(args) {
+	const flags = parseArgs(args, 1, KNOWN_FLAGS.list).flags;
+	const format = outputFormat(flags);
+	const app = getApp();
+
+	const collection = flags.group
+		? resolveGroup(app, flags.group).people
+		: app.people;
+
+	printSummaries(readSummaries(collection), format);
+}
+
+function cmdSearch(args) {
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.search);
+	const format = outputFormat(parsed.flags);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx search <query>", 1);
+	}
+	// Only the first positional is read. Multi-term AND matching is the
+	// mitigation if `cx search gmail` proves too noisy now that email domains
+	// are matched -- parseArgs already collects the rest.
+	const query = parsed.positionals[0];
+
+	// This used to be one whose() disjunction over four name/organization
+	// properties, then a readSummary per hit. Both halves were problems: emails,
+	// phones and the note could not be reached by any specifier Contacts
+	// accepts, and `cx search a` matched 267 of 340 contacts at one Apple Event
+	// per property per hit -- measured at 55 seconds.
+	//
+	// Fetching plurally and matching here costs the same whether the query hits
+	// nothing or everything. It is constant in the number of matches and linear
+	// in the size of the address book, where it used to be the other way round.
+	const app = getApp();
+	printSummaries(filterSearch(readSearchables(app.people), query), format);
+}
+
+function cmdGet(args) {
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.get);
+	const format = outputFormat(parsed.flags);
+	if (parsed.positionals.length === 0) exitWithError("usage: cx get <id>", 1);
+	const app = getApp();
+	const record = readCard(resolveId(app, parsed.positionals[0]));
+	emit(format, record, () => formatCard(record));
+}
+
+function cmdCreate(args) {
+	const change = readInput("create", args, 1).change;
+
+	const first = change.scalars.firstName;
+	const last = change.scalars.lastName;
+	const org = change.scalars.organization;
+	if (!first && !last && !org) {
+		exitWithError("create requires at least --first, --last or --org", 1);
+	}
+
+	const app = getApp();
+	const targetGroup = change.group ? resolveGroup(app, change.group) : null;
+
+	const personProps = {};
+	if (first) personProps.firstName = first;
+	if (last) personProps.lastName = last;
+	// Contacts models a business as a person record flagged as a company,
+	// displayed by organization rather than by name. The organization goes in at
+	// push time rather than with the other scalars: until it lands the record has
+	// no name and no organization at all, so nothing can find it -- not a search,
+	// and not the test harness sweeping up after an interrupted run.
+	if (!first && !last) {
+		personProps.company = true;
+		personProps.organization = org;
+	}
+
+	const person = app.Person(personProps);
+	app.people.push(person);
+
+	applyScalars(person, change.scalars);
+	applyNote(person, change.note);
+	applyCollections(app, person, change.collections);
+
+	if (targetGroup) app.add(person, { to: targetGroup });
+
+	saveOrFail(app);
+	emitAction(change.format, "created", person);
+}
+
+function cmdUpdate(args) {
+	const input = readInput("update", args, 1);
+	if (input.positionals.length === 0) {
+		exitWithError("usage: cx update <id> [--field value ...]", 1);
+	}
+	const change = input.change;
+	// Otherwise a typo that parsed as nothing still reported "Updated <name>"
+	// and exit 0. Exit 0 now means something changed.
+	if (
+		Object.keys(change.scalars).length === 0 &&
+		!change.note &&
+		Object.keys(change.collections).length === 0
+	) {
+		exitWithError("update requires at least one field to change", 1);
+	}
+
+	const app = getApp();
+	const person = resolveId(app, input.positionals[0]);
+
+	applyScalars(person, change.scalars);
+	applyNote(person, change.note);
+	applyCollections(app, person, change.collections);
+
+	saveOrFail(app);
+	emitAction(change.format, "updated", person);
+}
+
+function cmdDelete(args) {
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.delete);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx delete <id> [--force]", 1);
+	}
+	const format = outputFormat(parsed.flags);
+	const app = getApp();
+	const person = resolveId(app, parsed.positionals[0]);
+	const flags = parsed.flags;
+	const name = person.name() || "(no name)";
+	const id = person.id();
+	const sid = shortId(id);
+
+	if (!flags.force) {
+		const s = readSummary(person);
+		emit(format, { action: "confirmation-required", target: s }, () => {
+			const lines = [`Will delete: ${s.name} (${sid})`];
+			if (s.email) lines.push(`  Email: ${s.email}`);
+			if (s.phone) lines.push(`  Phone: ${s.phone}`);
+			if (s.organization) lines.push(`  Org:   ${s.organization}`);
+			return lines.join("\n");
+		});
+		exitAwaitingConfirmation(format);
+	}
+
+	app.delete(person);
+	saveOrFail(app);
+	// id is read before the delete: reading it after throws -1728, the object
+	// is gone.
+	emit(
+		format,
+		{ action: "deleted", id: id, shortId: sid, name: name },
+		() => `Deleted ${name} (${sid})`,
+	);
+}
+
+function cmdGroups(args) {
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.groups);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx groups <subcommand> [args]", 1);
+	}
+	const sub = parsed.positionals[0];
+	const rest = parsed.positionals.slice(1);
+	const format = outputFormat(parsed.flags);
+	const app = getApp();
+
+	switch (sub) {
+		case "list":
+			groupsList(app, format);
+			break;
+		case "members":
+			if (rest.length < 1) exitWithError("usage: cx groups members <name>", 1);
+			groupsMembers(app, rest[0], format);
+			break;
+		case "add":
+			if (rest.length < 2)
+				exitWithError("usage: cx groups add <contact-id> <group-name>", 1);
+			groupsAdd(app, rest[0], rest[1], format);
+			break;
+		case "remove":
+			if (rest.length < 2)
+				exitWithError("usage: cx groups remove <contact-id> <group-name>", 1);
+			groupsRemove(app, rest[0], rest[1], format);
+			break;
+		case "create":
+			if (rest.length < 1) exitWithError("usage: cx groups create <name>", 1);
+			groupsCreate(app, rest[0], format);
+			break;
+		case "delete":
+			if (rest.length < 1)
+				exitWithError("usage: cx groups delete <name> [--force]", 1);
+			groupsDelete(app, rest[0], parsed.flags, format);
+			break;
+		default:
+			exitWithError(`unknown groups subcommand: ${sub}`, 1);
+	}
+}
+
+function groupsList(app, format) {
+	const names = app.groups.name();
+	names.sort();
+	emit(format, names, () =>
+		names.length === 0 ? "(no groups)" : names.join("\n"),
+	);
+}
+
+function groupsMembers(app, name, format) {
+	printSummaries(readSummaries(resolveGroup(app, name).people), format);
+}
+
+function groupsAdd(app, contactId, groupName, format) {
+	const person = resolveId(app, contactId);
+	app.add(person, { to: resolveGroup(app, groupName) });
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "added", group: groupName, name: person.name() || "(no name)" },
+		() => `Added ${person.name() || "(no name)"} to ${groupName}`,
+	);
+}
+
+function groupsRemove(app, contactId, groupName, format) {
+	const person = resolveId(app, contactId);
+	app.remove(person, { from: resolveGroup(app, groupName) });
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "removed", group: groupName, name: person.name() || "(no name)" },
+		() => `Removed ${person.name() || "(no name)"} from ${groupName}`,
+	);
+}
+
+function groupsCreate(app, name, format) {
+	if (findGroup(app, name)) exitWithError(`group already exists: ${name}`, 1);
+
+	const group = app.Group({ name: name });
+	app.groups.push(group);
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "group-created", group: name },
+		() => `Created group: ${name}`,
+	);
+}
+
+function groupsDelete(app, name, flags, format) {
+	const group = resolveGroup(app, name);
+
+	if (!flags.force) {
+		const memberCount = group.people().length;
+		emit(
+			format,
+			{ action: "confirmation-required", group: name, members: memberCount },
+			() => `Will delete group: ${name} (${memberCount} members)`,
+		);
+		exitAwaitingConfirmation(format);
+	}
+
+	app.delete(group);
+	saveOrFail(app);
+	emit(
+		format,
+		{ action: "group-deleted", group: name },
+		() => `Deleted group: ${name}`,
+	);
+}
+
+function main() {
+	const args = getArgs();
+	if (args.length === 0) {
+		writeStdout(usage());
+		return;
+	}
+
+	const command = args[0];
+
+	switch (command) {
+		case "list":
+			cmdList(args);
+			break;
+		case "search":
+			cmdSearch(args);
+			break;
+		case "get":
+			cmdGet(args);
+			break;
+		case "create":
+			cmdCreate(args);
+			break;
+		case "update":
+			cmdUpdate(args);
+			break;
+		case "delete":
+			cmdDelete(args);
+			break;
+		case "groups":
+			cmdGroups(args);
+			break;
+		case "selftest":
+			cmdSelftest();
+			break;
+		case "version":
+		case "--version":
+		case "-v":
+			writeStdout(`cx ${VERSION}`);
+			break;
+		case "help":
+		case "--help":
+		case "-h":
+			writeStdout(usage());
+			break;
+		default:
+			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
+	}
+}
+
+// --- Selftest ---
+
+// Everything the selftest covers lives above the Contacts banner, and the
+// function itself touches nothing, so it sits here rather than among the
+// command bodies -- 200 lines of fixture between readInput and cmdCreate
+// made the one transition in the file that reads as a jump rather than a
+// call. It is still dispatched from main() like any other command.
 // so it can be checked without Contacts.app, without permission, and without
 // touching a single contact. This is where the logic that actually goes wrong
 // lives: label parsing, column fitting, date formatting, key aliasing.
@@ -1491,313 +1804,6 @@ function cmdSelftest() {
 		$.exit(1);
 	}
 	writeStdout("selftest: ok");
-}
-
-function cmdList(args) {
-	const flags = parseArgs(args, 1, KNOWN_FLAGS.list).flags;
-	const format = outputFormat(flags);
-	const app = getApp();
-
-	const collection = flags.group
-		? resolveGroup(app, flags.group).people
-		: app.people;
-
-	printSummaries(readSummaries(collection), format);
-}
-
-function cmdSearch(args) {
-	const parsed = parseArgs(args, 1, KNOWN_FLAGS.search);
-	const format = outputFormat(parsed.flags);
-	if (parsed.positionals.length === 0) {
-		exitWithError("usage: cx search <query>", 1);
-	}
-	// Only the first positional is read. Multi-term AND matching is the
-	// mitigation if `cx search gmail` proves too noisy now that email domains
-	// are matched -- parseArgs already collects the rest.
-	const query = parsed.positionals[0];
-
-	// This used to be one whose() disjunction over four name/organization
-	// properties, then a readSummary per hit. Both halves were problems: emails,
-	// phones and the note could not be reached by any specifier Contacts
-	// accepts, and `cx search a` matched 267 of 340 contacts at one Apple Event
-	// per property per hit -- measured at 55 seconds.
-	//
-	// Fetching plurally and matching here costs the same whether the query hits
-	// nothing or everything. It is constant in the number of matches and linear
-	// in the size of the address book, where it used to be the other way round.
-	const app = getApp();
-	printSummaries(filterSearch(readSearchables(app.people), query), format);
-}
-
-function cmdGet(args) {
-	const parsed = parseArgs(args, 1, KNOWN_FLAGS.get);
-	const format = outputFormat(parsed.flags);
-	if (parsed.positionals.length === 0) exitWithError("usage: cx get <id>", 1);
-	const app = getApp();
-	const record = readCard(resolveId(app, parsed.positionals[0]));
-	emit(format, record, () => formatCard(record));
-}
-
-function cmdCreate(args) {
-	const change = readInput("create", args, 1).change;
-
-	const first = change.scalars.firstName;
-	const last = change.scalars.lastName;
-	const org = change.scalars.organization;
-	if (!first && !last && !org) {
-		exitWithError("create requires at least --first, --last or --org", 1);
-	}
-
-	const app = getApp();
-	const targetGroup = change.group ? resolveGroup(app, change.group) : null;
-
-	const personProps = {};
-	if (first) personProps.firstName = first;
-	if (last) personProps.lastName = last;
-	// Contacts models a business as a person record flagged as a company,
-	// displayed by organization rather than by name. The organization goes in at
-	// push time rather than with the other scalars: until it lands the record has
-	// no name and no organization at all, so nothing can find it -- not a search,
-	// and not the test harness sweeping up after an interrupted run.
-	if (!first && !last) {
-		personProps.company = true;
-		personProps.organization = org;
-	}
-
-	const person = app.Person(personProps);
-	app.people.push(person);
-
-	applyScalars(person, change.scalars);
-	applyNote(person, change.note);
-	applyCollections(app, person, change.collections);
-
-	if (targetGroup) app.add(person, { to: targetGroup });
-
-	saveOrFail(app);
-	emitAction(change.format, "created", person);
-}
-
-function cmdUpdate(args) {
-	const input = readInput("update", args, 1);
-	if (input.positionals.length === 0) {
-		exitWithError("usage: cx update <id> [--field value ...]", 1);
-	}
-	const change = input.change;
-	// Otherwise a typo that parsed as nothing still reported "Updated <name>"
-	// and exit 0. Exit 0 now means something changed.
-	if (
-		Object.keys(change.scalars).length === 0 &&
-		!change.note &&
-		Object.keys(change.collections).length === 0
-	) {
-		exitWithError("update requires at least one field to change", 1);
-	}
-
-	const app = getApp();
-	const person = resolveId(app, input.positionals[0]);
-
-	applyScalars(person, change.scalars);
-	applyNote(person, change.note);
-	applyCollections(app, person, change.collections);
-
-	saveOrFail(app);
-	emitAction(change.format, "updated", person);
-}
-
-function cmdDelete(args) {
-	const parsed = parseArgs(args, 1, KNOWN_FLAGS.delete);
-	if (parsed.positionals.length === 0) {
-		exitWithError("usage: cx delete <id> [--force]", 1);
-	}
-	const format = outputFormat(parsed.flags);
-	const app = getApp();
-	const person = resolveId(app, parsed.positionals[0]);
-	const flags = parsed.flags;
-	const name = person.name() || "(no name)";
-	const id = person.id();
-	const sid = shortId(id);
-
-	if (!flags.force) {
-		const s = readSummary(person);
-		emit(format, { action: "confirmation-required", target: s }, () => {
-			const lines = [`Will delete: ${s.name} (${sid})`];
-			if (s.email) lines.push(`  Email: ${s.email}`);
-			if (s.phone) lines.push(`  Phone: ${s.phone}`);
-			if (s.organization) lines.push(`  Org:   ${s.organization}`);
-			return lines.join("\n");
-		});
-		exitAwaitingConfirmation(format);
-	}
-
-	app.delete(person);
-	saveOrFail(app);
-	// id is read before the delete: reading it after throws -1728, the object
-	// is gone.
-	emit(
-		format,
-		{ action: "deleted", id: id, shortId: sid, name: name },
-		() => `Deleted ${name} (${sid})`,
-	);
-}
-
-function cmdGroups(args) {
-	const parsed = parseArgs(args, 1, KNOWN_FLAGS.groups);
-	if (parsed.positionals.length === 0) {
-		exitWithError("usage: cx groups <subcommand> [args]", 1);
-	}
-	const sub = parsed.positionals[0];
-	const rest = parsed.positionals.slice(1);
-	const format = outputFormat(parsed.flags);
-	const app = getApp();
-
-	switch (sub) {
-		case "list":
-			groupsList(app, format);
-			break;
-		case "members":
-			if (rest.length < 1) exitWithError("usage: cx groups members <name>", 1);
-			groupsMembers(app, rest[0], format);
-			break;
-		case "add":
-			if (rest.length < 2)
-				exitWithError("usage: cx groups add <contact-id> <group-name>", 1);
-			groupsAdd(app, rest[0], rest[1], format);
-			break;
-		case "remove":
-			if (rest.length < 2)
-				exitWithError("usage: cx groups remove <contact-id> <group-name>", 1);
-			groupsRemove(app, rest[0], rest[1], format);
-			break;
-		case "create":
-			if (rest.length < 1) exitWithError("usage: cx groups create <name>", 1);
-			groupsCreate(app, rest[0], format);
-			break;
-		case "delete":
-			if (rest.length < 1)
-				exitWithError("usage: cx groups delete <name> [--force]", 1);
-			groupsDelete(app, rest[0], parsed.flags, format);
-			break;
-		default:
-			exitWithError(`unknown groups subcommand: ${sub}`, 1);
-	}
-}
-
-function groupsList(app, format) {
-	const names = app.groups.name();
-	names.sort();
-	emit(format, names, () =>
-		names.length === 0 ? "(no groups)" : names.join("\n"),
-	);
-}
-
-function groupsMembers(app, name, format) {
-	printSummaries(readSummaries(resolveGroup(app, name).people), format);
-}
-
-function groupsAdd(app, contactId, groupName, format) {
-	const person = resolveId(app, contactId);
-	app.add(person, { to: resolveGroup(app, groupName) });
-	saveOrFail(app);
-	emit(
-		format,
-		{ action: "added", group: groupName, name: person.name() || "(no name)" },
-		() => `Added ${person.name() || "(no name)"} to ${groupName}`,
-	);
-}
-
-function groupsRemove(app, contactId, groupName, format) {
-	const person = resolveId(app, contactId);
-	app.remove(person, { from: resolveGroup(app, groupName) });
-	saveOrFail(app);
-	emit(
-		format,
-		{ action: "removed", group: groupName, name: person.name() || "(no name)" },
-		() => `Removed ${person.name() || "(no name)"} from ${groupName}`,
-	);
-}
-
-function groupsCreate(app, name, format) {
-	if (findGroup(app, name)) exitWithError(`group already exists: ${name}`, 1);
-
-	const group = app.Group({ name: name });
-	app.groups.push(group);
-	saveOrFail(app);
-	emit(
-		format,
-		{ action: "group-created", group: name },
-		() => `Created group: ${name}`,
-	);
-}
-
-function groupsDelete(app, name, flags, format) {
-	const group = resolveGroup(app, name);
-
-	if (!flags.force) {
-		const memberCount = group.people().length;
-		emit(
-			format,
-			{ action: "confirmation-required", group: name, members: memberCount },
-			() => `Will delete group: ${name} (${memberCount} members)`,
-		);
-		exitAwaitingConfirmation(format);
-	}
-
-	app.delete(group);
-	saveOrFail(app);
-	emit(
-		format,
-		{ action: "group-deleted", group: name },
-		() => `Deleted group: ${name}`,
-	);
-}
-
-function main() {
-	const args = getArgs();
-	if (args.length === 0) {
-		writeStdout(usage());
-		return;
-	}
-
-	const command = args[0];
-
-	switch (command) {
-		case "list":
-			cmdList(args);
-			break;
-		case "search":
-			cmdSearch(args);
-			break;
-		case "get":
-			cmdGet(args);
-			break;
-		case "create":
-			cmdCreate(args);
-			break;
-		case "update":
-			cmdUpdate(args);
-			break;
-		case "delete":
-			cmdDelete(args);
-			break;
-		case "groups":
-			cmdGroups(args);
-			break;
-		case "selftest":
-			cmdSelftest();
-			break;
-		case "version":
-		case "--version":
-		case "-v":
-			writeStdout(`cx ${VERSION}`);
-			break;
-		case "help":
-		case "--help":
-		case "-h":
-			writeStdout(usage());
-			break;
-		default:
-			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
-	}
 }
 
 // --- Run ---
