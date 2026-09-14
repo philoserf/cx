@@ -290,7 +290,7 @@ function outputFormat(flags) {
 	return format;
 }
 
-const VERSION = "2.0.0";
+const VERSION = "2.1.0";
 
 // The options sections are generated from the catalogues, so the help text
 // cannot drift from the parser. It used to say "[opts]" and stop, leaving
