@@ -38,15 +38,15 @@ disguised as a log line.
 ## The organizing ideas
 
 **One file, and that is the runtime's decision, not a style choice.** JXA has no `require`,
-no `import`, no module system at all. `cx.js` is about 1,480 lines organized by section
-comment because section comments are the only structuring device available. A maintainer
+no `import`, no module system at all. `cx.js` is some eighteen hundred lines organized by
+section comment because section comments are the only structuring device available. A maintainer
 who "tidies this up" into modules is fighting `osascript`, not the code. The same
 constraint is why `cx selftest` ships inside the production file: there is nowhere else to
 put a test that must run under the same interpreter.
 
-The four banners are not topical groupings. They are `Process I/O`, `Pure helpers`,
-`Contacts access`, and `Commands and dispatch`, and the third one is load-bearing — it is
-the read/render boundary made positional. An earlier arrangement grouped by subject
+The banners are not topical groupings. They are `Process I/O`, `Pure helpers`,
+`Contacts access`, `Commands and dispatch`, and `Selftest`, and the third one is
+load-bearing — it is the read/render boundary made positional. An earlier arrangement grouped by subject
 (`--- Contacts.app helpers ---` covered a third of the file, most of which touched nothing),
 and the cost was that "does this touch Contacts?" could only be answered by reading each
 body. That question is the one the architecture turns on, so it is the one the layout
@@ -151,11 +151,21 @@ style.
 
 The catch, and it is the kind of thing only measurement finds: plural access works on an
 element collection — `app.people`, or a group's `people` — but **not** on a `whose()`
-specifier, where it measured 13.3s for 256 names, worse than the loop. That is why
-`cmdSearch`, whose input is a `whose()` result, still calls `readSummary` per contact while
-`cmdList` and `groupsMembers` call `readSummaries` on a collection. The two functions
-produce the same record shape by different means and are not redundant; deleting either one
-in the name of removing duplication would cost an order of magnitude somewhere.
+specifier, where it measured 13.3s for 256 names, worse than the loop.
+
+For a long time that fact was read as a constraint on `cx search`, which took a `whose()`
+result and therefore called `readSummary` per hit. It is better read the other way round:
+the fix is not to make `whose()` faster but to stop asking Contacts to do the selecting.
+`cmdSearch` now fetches plurally like everything else and matches in JavaScript, and the
+13.3s figure is simply a fact about JXA rather than a rationale for anything in the file.
+
+Three readers remain and none is redundant. `readSummaries` is the five-event bulk read for
+`cmdList` and `groupsMembers`. `readSearchables` is its superset — eight events — and is
+search's alone, because routing `cmdList` through it would cost the most-used command 45%
+more to fetch three properties no table renders. `readSummary` is the one-contact read, and
+survives for `cmdDelete`'s confirmation preview, where fetching the whole book to describe a
+single contact would be absurd. All three build their record through `summaryRecord`, so the
+duplication that remains is index pairing rather than policy.
 
 Because the index pairing is across five separate events, `readSummaries` refuses rather
 than guesses when the arrays come back at different lengths — misaligned arrays would
@@ -261,16 +271,19 @@ input appends**, unless `--replace <field>` empties the collection first, which 
 only way to clear one; **payload input replaces** any collection it names. Where both name
 the same collection, replace wins and both sets of values land in it.
 
-The thinnest place now is elsewhere, and it is smaller. `readCard` decides whether a
-collection value is a date two different ways — the scalar loop asks the catalogue
-(`spec.type === "date"`), the collection loop duck-types the runtime object via
-`formatValue`. Both give the same answer for the six rows that exist, so nothing is broken;
-what is broken is the principle, in the one file whose stated premise is that the catalogue
-is the single definition. That is issue #25. Related in kind: `parseLabelValue` decides
-label-versus-URI from a hard-coded list of four schemes, so `--url ssh://host` stores
-`//host` under a label named `ssh`. The rule it is reaching for is "a colon that starts a
-URI scheme is not a separator"; what it has is the four schemes someone needed. That is
-issue #29.
+Two thinner places have since been closed, and both were the same shape — a consumer
+deciding something the catalogue already declared, or a rule implemented as the list of
+cases someone happened to need. `readCard` used to ask the catalogue in its scalar loop and
+duck-type the runtime object in its collection loop; both now ask the row. `parseLabelValue`
+used to decide label-versus-URI from four hard-coded schemes, so `--url ssh://host` stored
+`//host` under a label named `ssh`; a scheme followed by `//` is now decided by shape, and
+the named list survives only for `tel:` and `mailto:`, where shape genuinely cannot tell a
+scheme from a label.
+
+Both are worth remembering as a pattern rather than as history. The file's premise is that
+the catalogues are the single definition of a field, and the way that premise erodes is
+never a dramatic violation — it is a consumer that reads a value instead of a row, giving
+the right answer for every case that exists today.
 
 One genuinely unresolved boundary remains, and it is a Contacts limitation rather than a
 `cx` one. Addresses and social profiles are rendered but not writable, because a Contacts
@@ -292,16 +305,28 @@ function, pure, and covered by the selftest.
 Hard, in rough order of how fundamental the rethink would be. **Anything wanting more than
 one file** is fighting the runtime. **Anything wanting interactive confirmation** is
 fighting the absence of a tty and would replace the two-step `--force` protocol that the
-tests and any calling script depend on. **Anything wanting to make `cmdSearch` fast** runs
-into the measured fact that plural access is worse on a `whose()` specifier, so it would
-mean fetching everything and filtering locally, which is a different program — and note that
-widening what `search` matches (issue #11) is the same problem, since the current four-way
-`_or` is the whole search surface and the note is precisely what it cannot reach. And
-**replacing JXA with `CNContactStore`** erases the reason the tool exists.
+tests and any calling script depend on. And **replacing JXA with
+`CNContactStore`** erases the reason the tool exists.
 
-One item moved off this list and it is worth saying why. "Anything wanting to unit-test code
-that touches Contacts has nowhere to stand" used to be true of the entire write path. Half
-of it is now false: the decision about what to write is a pure function and is tested as
+An earlier version of this list had a third entry: making `cmdSearch` fast, which it said
+"would mean fetching everything and filtering locally, which is a different program." That
+was the right diagnosis and the wrong conclusion. It is a different program, and it is the
+one the tool should have been — because the two problems it named were one problem.
+Contacts cannot express a predicate over an element collection at all
+(`whose({emails: {value: {_contains: q}}})` throws), so no amount of widening the `_or`
+would have reached an email, a phone or the note. Both the coverage gap and the 55-second
+broad query dissolved together the moment the selecting moved out of Contacts.
+
+The cost was real and is worth stating plainly rather than as a win: a narrow query got
+about a third of a second slower, and the cost is now proportional to the size of the
+address book rather than to the size of the result. On a very large book that trade would
+need revisiting — but it would be revisited by fetching in slices, not by putting a
+`whose()` fast path in front, which would make coverage depend on how many name-matches a
+query happened to have.
+
+Another item moved off this list and it is worth saying why. "Anything wanting to unit-test
+code that touches Contacts has nowhere to stand" used to be true of the entire write path.
+Half of it is now false: the decision about what to write is a pure function and is tested as
 one. What remains true is the other half — the code that drives JXA once the decision is
 made is still only reachable through `tests/test.sh` against a real address book, which is
 why that harness cleans up by prefix rather than by a list it built as it went, and why its
@@ -354,18 +379,39 @@ every formatter". Both were inferred from the code rather than measured, and bot
 single change. Its second edition then called the flag/JSON seam "a partly-finished piece of
 work" and listed three defects there — and that diagnosis was right, but it under-read the
 cause: the three defects were one defect, and naming it dissolved nine open findings at
-once. The pattern repeats. **Measure before you declare something structural, and when you
-find three bugs in one place, look for the one bug underneath them.**
+once.
+
+Its third edition made the same mistake in the same shape, about search. It listed
+"anything wanting to make `cmdSearch` fast" as hard and "widening what `search` matches" as
+a separate item, and treated the measured 13.3s `whose()` figure as a reason the design was
+forced. All three readings were wrong in one move: the two items were one item, the
+constraint was on the wrong side of the boundary, and the measurement that settled it took
+ten minutes and had never been taken — nobody had asked whether a nested predicate over a
+collection was expressible at all. It is not.
+
+The pattern is now three for three. **Measure before you declare something structural; when
+you find several problems in one place, look for the one problem underneath them; and be
+most suspicious of a measurement you are using as a reason, rather than as a fact.**
 
 ## Loose ends
 
-Open questions this theory points at, tracked as issues rather than restated here:
+The four this document last pointed at — the two-way date test, the four-scheme allowlist,
+the search surface, and the selftest's position in the file — are all closed, and the first
+three are discussed above where they belong rather than as a list.
 
-- **#25** — `readCard` decides "is this a date" two ways, one of which ignores the
-  catalogue. The clearest live counter-example to the single-definition premise.
-- **#29** — `parseLabelValue`'s four-scheme allowlist, the only ambiguous grammar `cx`
-  accepts and the one place it is resolved by a list rather than a rule.
-- **#11** — the search surface is four name and organization properties, so the note, the
-  field the tool exists for, is the one thing that cannot be searched.
-- **#34** — `cmdSelftest` is 215 of ~1,480 lines sitting between dispatch and the command
-  bodies, the one place the file resists being read straight through.
+What is left is smaller and none of it is filed, because none of it is yet a defect:
+
+- **Digits-only phone matching.** `cx search 5550199` does not find `555-0199`. Not a
+  regression — it found nothing at all before — but phones are nominally searchable now, so
+  this is the first thing a user is likely to report. Roughly six lines, and fully coverable
+  by the selftest.
+- **Multi-term search.** Only the first positional is read. If matching email domains proves
+  too noisy, AND-ing several terms is the mitigation, and `parseArgs` already collects them.
+- **Unicode normalisation.** The matcher inherits `whose({_contains})`'s diacritic
+  sensitivity deliberately, so that the rewrite changed no comparison behaviour. Whether
+  that is the *right* behaviour is a separate question nobody has asked, and folding NFC
+  would be a new promise rather than a restored one.
+- **The size of the address book.** Search is now linear in it. At a few hundred contacts
+  that is 1.2s and better than what it replaced on every query but a narrow hit. At ten
+  thousand it would want fetching in slices — and specifically not a `whose()` fast path,
+  which would make coverage depend on the query.

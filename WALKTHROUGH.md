@@ -1,20 +1,24 @@
 # cx Walkthrough
 
-*2026-09-14T15:50:02Z by Showboat 0.6.1*
-<!-- showboat-id: 89f0e694-eaad-4750-976e-e10c92b03b2a -->
+*2026-09-14T20:35:38Z by Showboat 0.6.1*
+<!-- showboat-id: 089f1964-7276-44b7-927f-16504d093370 -->
 
-`cx` is a macOS command-line tool for reading and writing Apple Contacts. It
-exists for one reason, and that reason shapes everything below: `CNContactStore`
-cannot touch a contact's **note** without the
+## Overview
+
+`cx` is a command-line tool for Apple Contacts on macOS. It exists for one
+reason: `CNContactStore` cannot read or write a contact's **note** without the
 `com.apple.developer.contacts.notes` entitlement, which needs Apple's approval
-and an app bundle. JXA — JavaScript for Automation, driven through `osascript` —
-has full access to every contact property with no entitlement and no signing.
+and an app bundle. JXA — JavaScript for Automation, run through `osascript` —
+has full access to every property with no entitlement and no signing.
 
-So the whole tool is one JXA script. JXA has no module system, no `require`, no
-`import`. Everything is in one file by design, and the only structuring device
-available is where a function sits in it.
+That constraint shapes everything below. There are two files:
 
-This walkthrough follows a command from the shell to Contacts.app and back.
+- `cx`, a short bash wrapper
+- `cx.js`, the whole tool
+
+JXA has no module system, so `cx.js` is one file by design. It is organised by
+section banner, and the banners do real work — where a function sits tells you
+what it is allowed to touch.
 
 ```bash
 cat cx
@@ -30,15 +34,12 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0")")"
 exec osascript -l JavaScript "$SCRIPT_DIR/cx.js" -- "$@"
 ```
 
-That is the entire executable. `cx` resolves its own symlink — it is installed
-to `~/.local/bin/cx` — so it can find `cx.js` beside itself, then `exec`s
-`osascript`. The bare `--` matters: without it `osascript` swallows the
-arguments meant for the script.
+`--` matters: it separates `osascript`'s own arguments from the script's, and
+without it `osascript` would try to interpret `--format` itself.
 
-## Architecture: two boundaries in one file
+## Architecture: the boundary the design turns on
 
-`cx.js` is about 1,480 lines with no modules, so it is organised by section
-banner, and the banners draw the one line the design turns on.
+Six banners divide the file.
 
 ```bash
 grep '^// --- ' cx.js
@@ -49,85 +50,32 @@ grep '^// --- ' cx.js
 // --- Pure helpers ---
 // --- Contacts access ---
 // --- Commands and dispatch ---
+// --- Selftest ---
 // --- Run ---
 ```
 
-The load-bearing banner is **Contacts access**. Everything above it is plain
-data in, plain data out — it never touches a JXA object. Everything below it
-talks to Contacts.app. That single line answers the question the architecture
-turns on, "does this touch Contacts?", by position rather than by reading each
-body.
+The load-bearing one is **Contacts access**. Everything above it is plain
+JavaScript over plain data — no Apple Events, no permission prompt, no
+address book. Everything below it talks to Contacts.app.
 
-Inside that, a second boundary runs the other way. `read*` functions touch
-Contacts and return plain records; `format*` functions take records and return
-strings and must never touch a JXA object. That is what makes `--format json` a
-serialiser rather than a second renderer — both formats consume the same record
-— and it is what lets `cx selftest` exercise the rendering with no Contacts.app
-at all.
+So position answers a question you would otherwise have to read the body to
+answer: *does this touch Contacts?* Keep it that way when adding a function.
+
+Two consequences follow from that line, and they are the two ideas the rest of
+this document keeps returning to:
+
+- **The read/render boundary.** `read*` functions turn live Contacts objects
+  into plain records. `format*` functions turn records into text and never
+  touch a JXA object. That is what makes `--format json` a serialiser rather
+  than a second renderer.
+- **`cx selftest`** can exercise everything above the banner with no
+  permission and no contacts — which is why the selftest now has a banner of
+  its own, at the end, rather than sitting in the middle of the command bodies.
 
 ## Entry: dispatch
 
-`main` runs at the bottom of the file. Everything above it is declarations,
-which JavaScript hoists, so the reading order and the execution order are
-different — the file reads top-down but nothing executes until the last line.
-
-```bash
-sed -n '/^function main/,/^}/p' cx.js
-```
-
-```output
-function main() {
-	const args = getArgs();
-	if (args.length === 0) {
-		writeStdout(usage());
-		return;
-	}
-
-	const command = args[0];
-
-	switch (command) {
-		case "list":
-			cmdList(args);
-			break;
-		case "search":
-			cmdSearch(args);
-			break;
-		case "get":
-			cmdGet(args);
-			break;
-		case "create":
-			cmdCreate(args);
-			break;
-		case "update":
-			cmdUpdate(args);
-			break;
-		case "delete":
-			cmdDelete(args);
-			break;
-		case "groups":
-			cmdGroups(args);
-			break;
-		case "selftest":
-			cmdSelftest();
-			break;
-		case "version":
-		case "--version":
-		case "-v":
-			writeStdout(`cx ${VERSION}`);
-			break;
-		case "help":
-		case "--help":
-		case "-h":
-			writeStdout(usage());
-			break;
-		default:
-			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
-	}
-}
-```
-
-`getArgs` is where the `--` from the wrapper is paid back — `osascript` hands
-the script its arguments through an ObjC bridge, not through `process.argv`.
+`main` is the last function in the file, and `main()` the last line. It reads
+argv, pulls the command off the front, and switches.
 
 ```bash
 sed -n '/^function getArgs/,/^}/p' cx.js
@@ -147,82 +95,58 @@ function getArgs() {
 }
 ```
 
-Everything the process writes goes through two functions, because JXA has no
-`console.log` that reaches stdout usefully — `NSFileHandle` does the work.
-
-```bash
-sed -n '/^function writeStderr/,/^}/p' cx.js; echo; sed -n '/^function exitWithError/,/^}/p' cx.js
-```
-
-```output
-function writeStderr(msg) {
-	const stderr = $.NSFileHandle.fileHandleWithStandardError;
-	const str = $.NSString.alloc.initWithUTF8String(`${msg}\n`);
-	stderr.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
-}
-
-function exitWithError(message, code) {
-	writeStderr(`error: ${message}`);
-	$.exit(code || 1);
-}
-```
-
-`exitWithError` is the only exit path for a failure, and the code it takes is
-part of the tool's contract: 0 success, 1 error, 2 permission denied, 3 not
-found, 4 ambiguous ID, 5 confirmation required. That set is the documented API —
-more so than the text output — so changing what exits 4 is a breaking change.
+`$.NSProcessInfo` gives every argument `osascript` itself received, so the
+wrapper's own arguments are still in there. The slice after `--` is the user's.
 
 ## The catalogues
 
-Every field `cx` knows about is one row in one of two tables. This is the
-file's central claim about itself: adding a field is one row, and no consumer
-gets a new case.
+`SCALARS` and `MULTI` are the single definition of every contact field, in the
+order a card renders them. The parser reads them, the flag allowlist is derived
+from them, the writers walk them, the renderers walk them, and `cx help` is
+generated from them.
+
+**Adding a field is one row.** If you find yourself adding a case to a
+consumer, the row is missing a key.
 
 ```bash
-sed -n '/^const SCALARS = \[/,/^];/p' cx.js
+sed -n '/^const SCALARS = \[/,/^\];/p' cx.js
 ```
 
 ```output
 const SCALARS = [
-	{ prop: "name", display: "Name" },
-	{ flag: "first", prop: "firstName", display: "First" },
-	{ flag: "last", prop: "lastName", display: "Last" },
+	{ prop: "name", display: "Name", search: true },
+	{ flag: "first", prop: "firstName", display: "First", search: true },
+	{ flag: "last", prop: "lastName", display: "Last", search: true },
 	{ flag: "middle", prop: "middleName", display: "Middle" },
 	// namePrefix throws -1700 on some contacts; the read stays guarded.
 	{ prop: "namePrefix", display: "Prefix", guarded: true },
 	{ flag: "suffix", prop: "suffix", json: "nameSuffix", display: "Suffix" },
 	{ flag: "nickname", prop: "nickname", display: "Nickname" },
 	{ flag: "maiden", prop: "maidenName", display: "Maiden" },
-	{ flag: "org", prop: "organization", display: "Organization" },
+	{ flag: "org", prop: "organization", display: "Organization", search: true },
 	{ flag: "title", prop: "jobTitle", display: "Job Title" },
 	{ flag: "dept", prop: "department", display: "Department" },
 	{ flag: "birthday", prop: "birthDate", display: "Birthday", type: "date" },
 	// Handled by applyNote, not the generic setter — see there.
-	{ flag: "note", prop: "note", manual: true },
+	{ flag: "note", prop: "note", manual: true, search: true },
 ];
 ```
 
-Read the keys as answers to questions each consumer asks:
+Four keys carry decisions rather than data:
 
-- **`flag`** — the CLI spelling. Absent means `cx` renders the field but cannot
-  set it. `name` and `namePrefix` have no `flag`, and that is the whole
-  read-only mechanism.
-- **`prop`** — the Contacts property. This is the canonical key: the change
-  record built later is keyed by `prop`, not by `flag`.
-- **`json`** — the payload key, only where it differs from `prop`. Exactly one
-  row needs it: `suffix` is `nameSuffix` in a payload. This is a `SCALARS`
-  concept; a collection's payload key is always its `coll`.
-- **`type: "date"`** — routes the value through `parseDateFlag` in both
-  directions.
-- **`manual: true`** — the note is not set by the generic loop. It is the field
-  the tool exists for and has no undo, so it gets its own writer.
-- **`guarded: true`** — `namePrefix` throws JXA error `-1700` on some contacts,
-  so `readCard` wraps that one read in a try/catch.
-
-The repeatable fields are the second table.
+- **`guarded`** — `namePrefix` throws `-1700` on some contacts, so `readCard`
+  wraps that one read in a try/catch.
+- **`manual`** — the note is not written by the generic scalar setter; it has
+  its own writer, because replacing a note is the one destructive act the tool
+  performs.
+- **`json`** — names a payload key where it differs from the Contacts property.
+  Exactly one row needs it (`suffix` / `nameSuffix`). This is a `SCALARS`
+  concept only.
+- **`search`** — whether `cx search` looks at this field. More on that below;
+  it is not derivable, which is why the row says so.
 
 ```bash
-sed -n '/^const MULTI = \[/,/^];/p' cx.js
+sed -n '/^const MULTI = \[/,/^\];/p' cx.js
 ```
 
 ```output
@@ -233,6 +157,7 @@ const MULTI = [
 		ctor: "Email",
 		defaultLabel: "home",
 		display: "Email",
+		search: true,
 	},
 	{
 		flag: "phone",
@@ -240,6 +165,7 @@ const MULTI = [
 		ctor: "Phone",
 		defaultLabel: "home",
 		display: "Phone",
+		search: true,
 	},
 	{
 		flag: "url",
@@ -268,104 +194,32 @@ const MULTI = [
 ];
 ```
 
-`coll` is the Contacts collection name and doubles as the payload key. `ctor` is
-the Contacts constructor — `app.Email({label, value})` — and it is also **the
-writable test**: it is present on every row `cx` can construct and absent on
-exactly one, `instantMessages`, which Contacts holds but `cx` has no way to
-build. Writers filter on `spec.ctor`, so read-only-ness is a property of the
-row rather than a case in a consumer.
+**`ctor` is the writable test.** It names the Contacts constructor, it is
+present on every row `cx` can build, and it is absent only on
+`instantMessages`, which Contacts holds and `cx` only renders. The writers
+filter on it.
 
-Row order is card order. `readCard` and `formatCard` both loop the table, so the
-order a field appears on screen is the order it appears here.
+Do not invent a second key for that. An earlier version filtered on a `json`
+key that only two rows happened to carry, and four writable collections were
+silently dropped.
 
-Six lookups read these tables, and each answers a different question.
-
-```bash
-sed -n '/^function multiSpecForFlag/,/^}/p' cx.js; echo; sed -n '/^function multiSpecForReplace/,/^}/p' cx.js; echo; sed -n '/^function multiSpecForPayloadKey/,/^}/p' cx.js
-```
-
-```output
-function multiSpecForFlag(flag) {
-	for (let i = 0; i < MULTI.length; i++) {
-		if (MULTI[i].flag === flag) return MULTI[i];
-	}
-	return null;
-}
-
-function multiSpecForReplace(name) {
-	for (let i = 0; i < MULTI.length; i++) {
-		const spec = MULTI[i];
-		if (spec.ctor && (spec.flag === name || spec.coll === name)) return spec;
-	}
-	return null;
-}
-
-function multiSpecForPayloadKey(key) {
-	for (let i = 0; i < MULTI.length; i++) {
-		if (MULTI[i].ctor && key === MULTI[i].coll) return MULTI[i];
-	}
-	return null;
-}
-```
-
-`multiSpecForReplace` accepting either spelling is deliberate: the flags are
-singular (`--email`) and the payload keys plural (`emails`), the README teaches
-the plural, and `--replace emails` used to be an error raised *after* the note
-had already been overwritten.
+Addresses and social profiles are not in `MULTI` at all. Contacts models an
+address as a record of street, city, state, zip and country rather than the
+`label`/`value` pair every writable collection uses, so it needs a shape `cx`
+does not have. `cx get` renders them; no input mode sets them, and a payload
+naming one is rejected rather than quietly ignored.
 
 ## Input: argv and stdin become one record
 
-`parseArgs` turns argv into flags and positionals. It has no notion of order, so
-a flag may appear anywhere — `cx delete --force <id>` once read `--force` as the
-contact ID.
+Two dialects reach the tool — repeated flags, and a JSON payload on stdin —
+and they normalise into one plain record before anything is written.
+
+`parseArgs` comes first. It takes a per-command allowlist derived from the
+catalogues, so a flag a command does not read is an error rather than a
+silently ignored argument.
 
 ```bash
-sed -n '/^function parseArgs/,/^}/p' cx.js
-```
-
-```output
-function parseArgs(args, startIndex, allowed) {
-	const flags = {};
-	const positionals = [];
-	for (let i = startIndex; i < args.length; i++) {
-		if (args[i].indexOf("--") !== 0) {
-			positionals.push(args[i]);
-			continue;
-		}
-		const key = args[i].substring(2);
-		if (allowed && allowed.indexOf(key) === -1) {
-			exitWithError(`unknown flag for this command: --${key}`, 1);
-		}
-		if (key === "force") {
-			flags.force = true;
-		} else if (key === "json") {
-			flags.json = true;
-		} else if (i + 1 < args.length) {
-			i++;
-			if (key === "replace" || multiSpecForFlag(key)) {
-				if (!flags[key]) flags[key] = [];
-				flags[key].push(args[i]);
-			} else {
-				flags[key] = args[i];
-			}
-		} else {
-			exitWithError(`flag --${key} requires a value`, 1);
-		}
-	}
-	return { flags: flags, positionals: positionals };
-}
-```
-
-Three behaviours to notice. `--force` and `--json` are the only booleans, so
-everything else consumes the next argument. A flag in `MULTI` — or `--replace` —
-accumulates into an array instead of overwriting, which is what makes repetition
-work. And `allowed` is checked before anything else: a flag the command does not
-read is an error, not a silent no-op.
-
-That list comes from the catalogues, so it cannot drift from them.
-
-```bash
-sed -n '/^function flagsOf/,/^}/p' cx.js; echo; sed -n '/^const KNOWN_FLAGS = {/,/^};/p' cx.js
+sed -n '/^function flagsOf/,/^}/p' cx.js
 ```
 
 ```output
@@ -376,7 +230,13 @@ function flagsOf(table) {
 	}
 	return names;
 }
+```
 
+```bash
+sed -n '/^const KNOWN_FLAGS = {/,/^};/p' cx.js
+```
+
+```output
 const KNOWN_FLAGS = {
 	list: ["format", "group"],
 	search: ["format"],
@@ -394,12 +254,12 @@ const KNOWN_FLAGS = {
 };
 ```
 
-Only `create` and `update` take `--json`; only `update` takes `--replace`; only
-`list` takes `--group` as a filter while `create` takes it as a destination.
-Those asymmetries are why the allowlist is per command rather than global.
+Note `group` is allowed on `list` and `create` but not on `update` — a
+difference the change record below inherits.
 
-Now the centre of the file. `buildChange` takes the parsed flags and the parsed
-payload — both plain data — and returns one record. It touches nothing.
+`buildChange` is the heart of the input path. It is **pure**: plain data in,
+plain data out, no Contacts object anywhere. That is what lets `cx selftest`
+cover the entire flag-and-payload mapping.
 
 ```bash
 sed -n '/^function buildChange/,/^}/p' cx.js
@@ -411,6 +271,9 @@ function buildChange(flags, payload) {
 		scalars: {},
 		note: null,
 		collections: {},
+		// Only cmdCreate ever reads this. `update`'s allowlist rejects --group,
+		// so it is unconditionally null on that path; the record is built the
+		// same way for both rather than branching on the command.
 		group: flags.group || null,
 		format: outputFormat(flags),
 	};
@@ -481,56 +344,31 @@ function buildChange(flags, payload) {
 }
 ```
 
-The record it returns is the spine of the write path:
+The record it returns is **the change record**, and it is the file's central
+noun — one normalised shape that both input dialects produce:
 
-```bash
-cat <<'SHAPE'
-{
-  scalars:     { firstName: "Jane", birthDate: <Date> },   // keyed by spec.prop
-  note:        { mode: "replace" | "append", text },
-  collections: {
-    emails:      { mode: "append" | "replace", items: [{label, value}] },
-    customDates: { mode: "replace",            items: [{label, value: <Date>}] },
-  },
-  group, format
-}
-SHAPE
-```
+    { scalars: {firstName, birthDate: <Date>},
+      note: {mode, text} | null,
+      collections: {emails: {mode, items}},
+      group, format }
 
-```output
-{
-  scalars:     { firstName: "Jane", birthDate: <Date> },   // keyed by spec.prop
-  note:        { mode: "replace" | "append", text },
-  collections: {
-    emails:      { mode: "append" | "replace", items: [{label, value}] },
-    customDates: { mode: "replace",            items: [{label, value: <Date>}] },
-  },
-  group, format
-}
-```
+Two things about it are load-bearing.
 
-Four things are true of it, and each one used to be false.
+**Every rejection belongs here**, before `getApp()` is ever called. A command
+rejected for bad input has opened nothing and written nothing.
 
-**It is keyed by Contacts property name.** There is one key space. Flag input
-and payload input used to land in two disjoint ones — `email` versus `emails` —
-with four separate writers and a `source` field carried down so `cmdUpdate`
-could pick a pipeline and discard the other one's input.
+**Input is closed.** An unknown flag, an unknown payload key, and an update
+naming no field are all errors. So exit 0 from a write means something actually
+changed. Do not loosen that to accept-and-ignore: the field this tool exists
+for has no undo, and a silent no-op reported as success is the worst available
+outcome.
 
-**Dates are `Date` objects, not strings.** Parsing is done, not deferred.
+One name to keep straight: inside `applyCollections` the per-collection
+`{mode, items}` pair is called `entry`, not `change`. `change` means the whole
+record everywhere in the file, and reusing it for one sixth of one field of
+itself made that function the one place the vocabulary quietly shifted.
 
-**The two dialects keep their own semantics, expressed as `mode`.** A repeated
-flag appends; a payload names a collection wholesale and replaces it. Merging
-the key spaces did not merge the semantics — that distinction is deliberate and
-`mode` is where it now lives, as data rather than as which function ran.
-
-**Normalisation is validation.** Every rejection above happens here, before any
-Contacts call. That matters more than it looks: a JXA `push` is visible to every
-other process the moment it happens, and stays visible until Contacts.app quits.
-A failure after the push leaves a real, findable, half-built contact — so
-"nothing that can fail may run after the push" is a correctness rule, not
-tidiness.
-
-Payload keys are resolved against the same catalogues.
+JSON arrives through `applyPayload`, which writes into the same record.
 
 ```bash
 sed -n '/^function applyPayload/,/^}/p' cx.js
@@ -597,65 +435,21 @@ function applyPayload(change, payload) {
 }
 ```
 
-The three-way fallthrough — note, scalar, collection, then error — means an
-unrecognised key is never dropped. It is either written or named in an error,
-which is the difference between "your payload did nothing" and "your payload had
-a typo on line 3". `READ_ONLY_KEYS` names the ones `cx get` emits but nothing
-can set, so the most likely mistake gets the most specific message.
+The two dialects differ in one deliberate way: **flag input appends, JSON input
+replaces.** `--replace <field>` empties a collection first, which is also how
+you clear one. Where both name the same collection the payload's replace wins
+and both sets of values land in it.
 
-You can see all of it without a contact, because none of it reaches Contacts:
-
-```bash
-echo null | ./cx create --json; echo '{"firstName":"X","addresses":[]}' | ./cx create --json; echo '{"firstName":"X","nonsense":1}' | ./cx create --json; ./cx get a1b2c3d4 --json; ./cx update a1b2c3d4 --note a --note-append b; true
-```
-
-```output
-error: --json expects a JSON object on stdin
-error: addresses is rendered but cannot be written
-error: unknown key in JSON payload: nonsense
-error: unknown flag for this command: --json
-error: --note and --note-append are mutually exclusive
-```
-
-`readInput` is the only function that touches stdin, and it is deliberately
-thin. The split matters for testing: stdin can never be selftested, so the logic
-lives next door in `buildChange`, which can.
-
-```bash
-sed -n '/^function readInput/,/^}/p' cx.js
-```
-
-```output
-function readInput(command, args, startIndex) {
-	const parsed = parseArgs(args, startIndex, KNOWN_FLAGS[command]);
-	let payload;
-	if (parsed.flags.json) {
-		const stdin = readStdin().trim();
-		if (!stdin) exitWithError("--json requires JSON on stdin", 1);
-		try {
-			payload = JSON.parse(stdin);
-		} catch (e) {
-			exitWithError(`invalid JSON: ${e.message}`, 1);
-		}
-	}
-	return {
-		change: buildChange(parsed.flags, payload),
-		positionals: parsed.positionals,
-	};
-}
-```
-
-Note `payload` is left `undefined` when `--json` was not given, which is how
-`buildChange` distinguishes "no payload" from a payload of literal `null` —
-`echo null | cx create --json` has to be an error, not a no-op.
+That asymmetry is not an accident waiting to be tidied up. The key spaces were
+merged; these two semantics were not, and unifying them breaks one of two
+workflows.
 
 ## Crossing into Contacts
 
-Everything from here talks to Contacts.app. The first call is also the one that
-can be refused.
+Everything so far touched no address book. `getApp` is the crossing.
 
 ```bash
-sed -n '/^function getApp/,/^}/p' cx.js; echo; sed -n '/^function isPermissionError/,/^}/p' cx.js
+sed -n '/^function getApp/,/^}/p' cx.js
 ```
 
 ```output
@@ -674,19 +468,13 @@ function getApp() {
 	}
 	return app;
 }
-
-function isPermissionError(e) {
-	if (e.errorNumber === -1743 || e.errorNumber === -10004) return true;
-	return /not authori[sz]ed|not permitted|-1743/i.test(String(e.message || ""));
-}
 ```
 
 `app.name()` is a cheap probe whose only purpose is to make the permission
-failure happen *here*, with exit 2 and a sentence naming the System Settings
-pane, rather than somewhere deeper as a raw JXA error.
+failure happen here, with a message that says what to do, rather than somewhere
+deeper with a raw error number.
 
-Resolving an ID is the next Contacts call, and it is one query rather than a
-scan.
+Resolving an id is the other common crossing.
 
 ```bash
 sed -n '/^function resolveId/,/^}/p' cx.js
@@ -717,26 +505,20 @@ function resolveId(app, idArg) {
 }
 ```
 
-A short ID is the first 8 characters of the UUID, before the `:ABPerson`
-suffix — so a full ID is a prefix of itself and `_beginsWith` accepts both forms
-with no branch. The match is case-insensitive, which is why the README says
-"either case". Two matches is exit 4, and that is why anything automated should
-pass the full ID: an ambiguous prefix is a failure a script cannot retry out of.
-
-```bash
-sed -n '/^function shortId/,/^}/p' cx.js
-```
-
-```output
-function shortId(fullId) {
-	return String(fullId).substring(0, 8);
-}
-```
+A short id is the first 8 characters of the UUID, before the `:ABPerson`
+suffix. One `whose({id: {_beginsWith}})` query resolves either form, and it is
+case-insensitive. A prefix that matches more than one contact exits 4 — so an
+automated caller should pass the full id, because exit 4 is not something a
+script can retry out of.
 
 ## Reading: one Apple Event, not one per contact
 
-This is the single most consequential performance fact in the codebase, and it
-is not obvious from the JXA API.
+This is the performance story, and it is the whole performance story.
+
+`person.id()` is one Apple Event. A loop over 340 contacts calling `.id()` on
+each is 340 events, and that is how `cx list` once took 47 seconds. But
+`app.people.id()` — plural access on the *collection* — fetches every id in a
+single event.
 
 ```bash
 sed -n '/^function readSummaries/,/^}/p' cx.js
@@ -764,32 +546,228 @@ function readSummaries(collection) {
 
 	const summaries = [];
 	for (let i = 0; i < ids.length; i++) {
-		summaries.push({
-			id: ids[i],
-			shortId: shortId(ids[i]),
-			name: names[i] || "(no name)",
-			email: emails[i] && emails[i].length > 0 ? emails[i][0] : "",
-			phone: phones[i] && phones[i].length > 0 ? phones[i][0] : "",
-			organization: orgs[i] || "",
-		});
+		summaries.push(
+			summaryRecord(ids[i], names[i], orgs[i], emails[i], phones[i]),
+		);
 	}
 	return summaries;
 }
 ```
 
-Every line in the first half fetches **one property for every contact in one
-Apple Event**. `collection.id()` on a collection returns an array of every ID.
-The loop afterwards only zips plain arrays together — no Contacts access at all.
+Five properties, five events, paired by index. The length check is not
+paranoia: the arrays arrive from separate events, so if Contacts ever returned
+different lengths, pairing them by position would attach one person's email to
+another. Refusing is the only safe answer.
 
-The rejected alternative is the natural one: loop the people and call
-`person.id()`, `person.name()` on each. That is one Apple Event per property per
-contact, and it measured 47 seconds for `list` against a few hundred contacts.
-Plural access takes the same work to about 0.8s.
+**Plural access works on an element collection — `app.people`, or a group's
+people — and not on a `whose()` specifier**, where it measured 13.3s for 256
+names, worse than the per-contact loop.
 
-There is a trap in it, recorded in `CLAUDE.md`, and it is why `cx search` looks
-different: **plural access does not work on a `whose()` specifier.** It measured
-13.3s for 256 names, worse than the per-contact loop. So search keeps the
-per-contact `readSummary`.
+`readSummary` is the one-contact version, and it survives for exactly one
+caller: `cmdDelete`, which describes a single already-resolved contact in its
+confirmation preview. Fetching the whole book plurally to do that would be
+absurd.
+
+```bash
+sed -n '/^function readSummary(/,/^}/p' cx.js
+```
+
+```output
+function readSummary(person) {
+	const emails = person.emails();
+	const phones = person.phones();
+	return summaryRecord(
+		person.id(),
+		person.name(),
+		person.organization(),
+		emails.length > 0 ? [emails[0].value()] : [],
+		phones.length > 0 ? [phones[0].value()] : [],
+	);
+}
+```
+
+Both readers, and the search reader below, build their record through one
+function — so the three rules that shape it cannot drift apart.
+
+```bash
+sed -n '/^function summaryRecord/,/^}/p' cx.js
+```
+
+```output
+function summaryRecord(id, name, org, emailValues, phoneValues) {
+	return {
+		id: id,
+		shortId: shortId(id),
+		name: name || "(no name)",
+		email: emailValues && emailValues.length > 0 ? emailValues[0] : "",
+		phone: phoneValues && phoneValues.length > 0 ? phoneValues[0] : "",
+		organization: org || "",
+	};
+}
+```
+
+## Search: what Contacts cannot be asked
+
+`cx search` used to be one `whose()` disjunction over `firstName`, `lastName`,
+`name` and `organization`, followed by a `readSummary` per hit. Both halves
+were wrong, and they were wrong for the same underlying reason.
+
+**Contacts cannot express a predicate over an element collection.** This is
+measured, not inferred:
+
+    whose({note:   {_contains: q}})            works, 232ms
+    whose({emails: {value: {_contains: q}}})   throws
+        "Object does not have property emails"
+
+So for as long as the match happened inside Contacts, emails and phones were
+unreachable at any price. The note was reachable and simply was not asked for.
+The effect was that `cx search jane@co.com` printed `(no contacts)` and exited
+0 — indistinguishable from "this person is not in your address book" — in a
+tool whose whole reason to exist is the note field.
+
+The second half was cost. Every hit was a separate `readSummary`, so a broad
+query paid one Apple Event per property per contact. `cx search a` matched 267
+of 340 contacts and took **55 seconds**.
+
+What dissolves both: the collections are not *queryable*, but they are
+*readable in bulk*. `app.people.emails.value()` returns all 340 nested arrays
+in one Apple Event, in 128ms. So the fetch moved to plural access and the match
+moved into JavaScript.
+
+```bash
+sed -n '/^function readSearchables/,/^}/p' cx.js
+```
+
+```output
+function readSearchables(collection) {
+	// name, organization, emails and phones are wanted by both the table and
+	// the match set. Memoise so the overlap costs one Apple Event, not two.
+	const columns = {};
+	const fetch = (key, get) => {
+		if (!columns[key]) columns[key] = get();
+		return columns[key];
+	};
+
+	const ids = fetch("id", () => collection.id());
+
+	const scalarRows = searchRows(SCALARS);
+	for (let i = 0; i < scalarRows.length; i++) {
+		const prop = scalarRows[i].prop;
+		fetch(prop, () => collection[prop]());
+	}
+	const multiRows = searchRows(MULTI);
+	for (let k = 0; k < multiRows.length; k++) {
+		const coll = multiRows[k].coll;
+		fetch(coll, () => collection[coll].value());
+	}
+
+	// The five the table renders, searchable or not.
+	const names = fetch("name", () => collection.name());
+	const orgs = fetch("organization", () => collection.organization());
+	const emails = fetch("emails", () => collection.emails.value());
+	const phones = fetch("phones", () => collection.phones.value());
+
+	// Separate events paired by index, as in readSummaries. With eight the
+	// window in which Contacts could change under us is wider, so name the
+	// property that disagreed rather than reporting a bare mismatch.
+	const keys = Object.keys(columns);
+	for (let c = 0; c < keys.length; c++) {
+		if (columns[keys[c]].length !== ids.length) {
+			exitWithError(
+				`Contacts returned ${columns[keys[c]].length} values for ${keys[c]} and ${ids.length} ids`,
+				1,
+			);
+		}
+	}
+
+	const records = [];
+	for (let i = 0; i < ids.length; i++) {
+		const haystack = [];
+		for (let x = 0; x < scalarRows.length; x++) {
+			haystack.push(columns[scalarRows[x].prop][i]);
+		}
+		for (let k = 0; k < multiRows.length; k++) {
+			const spec = multiRows[k];
+			const values = columns[spec.coll][i];
+			for (let v = 0; v < values.length; v++) {
+				// The catalogue's date test, same as readCard's. customDates is
+				// the one collection whose .value() yields Date objects, so
+				// routing through it now keeps "adding a field is one row" true
+				// if that row is ever marked searchable.
+				const raw = values[v];
+				haystack.push(raw && spec.type === "date" ? formatDate(raw) : raw);
+			}
+		}
+		records.push({
+			// Values only, never labels: `cx search work` must not return every
+			// contact that happens to have a work email.
+			summary: summaryRecord(ids[i], names[i], orgs[i], emails[i], phones[i]),
+			haystack: haystack,
+		});
+	}
+	return records;
+}
+```
+
+Three details in there are decisions rather than mechanics.
+
+**The memoised `fetch`.** `name`, `organization`, `emails` and `phones` are
+wanted by both the rendered table and the match set. Without memoising, the
+overlap would cost a second Apple Event each.
+
+**Values only, never labels.** The haystack holds what a person typed as a
+value, not the label it was filed under. Otherwise `cx search work` would
+return every contact with a work email.
+
+**The catalogue's date test, not the value's shape.** `customDates` is the one
+collection whose `.value()` yields `Date` objects. Routing every collection
+value through `spec.type === "date"` now is what keeps "adding a field is one
+row" true if that row is ever marked searchable.
+
+The match itself is pure, and above the Contacts banner.
+
+```bash
+sed -n '/^function matchesQuery/,/^}/p' cx.js
+```
+
+```output
+function matchesQuery(record, query) {
+	const needle = String(query).toLowerCase();
+	for (let i = 0; i < record.haystack.length; i++) {
+		const value = record.haystack[i];
+		if (value && value.toLowerCase().indexOf(needle) !== -1) return true;
+	}
+	return false;
+}
+```
+
+Lowercase-and-`indexOf` reproduces `whose({_contains})` exactly. That matters
+more than it looks: `_contains` is **case-insensitive but diacritic-sensitive**
+— `MARK` finds Mark, and `Calderon` does *not* find `Calderón`. Both were
+measured and both are pinned in the selftest, so this rewrite changed *which
+fields* are searched and nothing about *how* a string is compared.
+
+The falsy guard is the whole empty-and-null story in one clause: a null note
+(298 of 340 contacts here), an empty organization and an absent value all fall
+through without a branch of their own.
+
+`filterSearch` then hands back the summary and drops the haystack, so the
+search key cannot reach stdout and `--format json` emits the six keys it always
+did.
+
+```bash
+sed -n '/^function filterSearch/,/^}/p' cx.js
+```
+
+```output
+function filterSearch(records, query) {
+	const hits = [];
+	for (let i = 0; i < records.length; i++) {
+		if (matchesQuery(records[i], query)) hits.push(records[i].summary);
+	}
+	return hits;
+}
+```
 
 ```bash
 sed -n '/^function cmdSearch/,/^}/p' cx.js
@@ -802,101 +780,63 @@ function cmdSearch(args) {
 	if (parsed.positionals.length === 0) {
 		exitWithError("usage: cx search <query>", 1);
 	}
+	// Only the first positional is read. Multi-term AND matching is the
+	// mitigation if `cx search gmail` proves too noisy now that email domains
+	// are matched -- parseArgs already collects the rest.
 	const query = parsed.positionals[0];
+
+	// This used to be one whose() disjunction over four name/organization
+	// properties, then a readSummary per hit. Both halves were problems: emails,
+	// phones and the note could not be reached by any specifier Contacts
+	// accepts, and `cx search a` matched 267 of 340 contacts at one Apple Event
+	// per property per hit -- measured at 55 seconds.
+	//
+	// Fetching plurally and matching here costs the same whether the query hits
+	// nothing or everything. It is constant in the number of matches and linear
+	// in the size of the address book, where it used to be the other way round.
 	const app = getApp();
-
-	const people = app.people.whose({
-		_or: [
-			{ firstName: { _contains: query } },
-			{ lastName: { _contains: query } },
-			{ name: { _contains: query } },
-			{ organization: { _contains: query } },
-		],
-	})();
-
-	const summaries = [];
-	for (let i = 0; i < people.length; i++) {
-		summaries.push(readSummary(people[i]));
-	}
-
-	printSummaries(summaries, format);
+	printSummaries(filterSearch(readSearchables(app.people), query), format);
 }
 ```
 
-Worth knowing as a user of the tool: that `_or` is the entire search surface.
-Emails, phones, urls, related names, custom dates and **the note** are not
-searched, and `name` is derived from first and last, so the effective surface is
-two name fields plus the company. `cx search jane@co.com` returns `(no
-contacts)` and exit 0 — indistinguishable from "not in your address book". The
-tool exists to reach the note, and the note is what cannot be searched. That is
-tracked as issue #11.
+The result is a cost that no longer depends on how much you find:
 
-A single card reads far more, and one field needs protecting.
+    cx search Ayers      2 hits     1.07s -> 1.19s
+    cx search zzznosuch  0 hits     0.54s -> 1.25s
+    cx search a        286 hits    55.51s -> 1.20s
+
+Search is now **constant in the number of matches and linear in the size of the
+address book.** It used to be the other way round. A narrow query pays about a
+third of a second more than it did; everything else is the trade.
+
+The match set is catalogue-driven, read by one function.
 
 ```bash
-sed -n '/^function readCard/,/^	const addresses/p' cx.js | sed '$d'
+sed -n '/^function searchRows/,/^}/p' cx.js
 ```
 
 ```output
-function readCard(person) {
-	const fields = {};
-	for (let i = 0; i < SCALARS.length; i++) {
-		const spec = SCALARS[i];
-		let value;
-		if (spec.guarded) {
-			try {
-				value = person[spec.prop]();
-			} catch (_e) {
-				value = null;
-			}
-		} else {
-			value = person[spec.prop]();
-		}
-		fields[spec.prop] =
-			value && spec.type === "date" ? formatDate(value) : value;
+function searchRows(table) {
+	const rows = [];
+	for (let i = 0; i < table.length; i++) {
+		if (table[i].search) rows.push(table[i]);
 	}
-
-	const multi = {};
-	for (let k = 0; k < MULTI.length; k++) {
-		const spec = MULTI[k];
-		const items = person[spec.coll]();
-		const list = [];
-		for (let m = 0; m < items.length; m++) {
-			list.push({
-				label: unwrapLabel(items[m].label() || spec.display),
-				value: formatValue(items[m].value()),
-			});
-		}
-		multi[spec.coll] = list;
-	}
-
-```
-
-Both loops walk a catalogue, which is the "adding a field is one row" claim
-being cashed in. The `spec.guarded` branch is `namePrefix` and only
-`namePrefix` — JXA throws `-1700` reading it on some contacts, and a card that
-crashed on one contact and not another would be a miserable bug to chase.
-
-`unwrapLabel` handles a Contacts quirk: built-in labels come back wrapped.
-
-```bash
-sed -n '/^function unwrapLabel/,/^}/p' cx.js
-```
-
-```output
-function unwrapLabel(label) {
-	const m = /^_\$!<(.*)>!\$_$/.exec(label);
-	return m ? m[1] : label;
+	return rows;
 }
 ```
 
-`readCard` returns a plain record — `{id, fields, multi, addresses,
-socialProfiles, groups}` — and that record is where Contacts stops. Everything
-downstream is a pure function of it.
+It is deliberately **not** derived from `ctor`, tempting though that is, and
+the scalar side is where that would be fatal rather than merely wrong:
+`app.people.namePrefix()` throws `-1728` for the **whole array**, not per
+contact. `readCard`'s `guarded` try/catch works because it wraps one call for
+one person; a plural fetch has no equivalent. A `guarded` row marked searchable
+would kill `cx search` for every query, for everyone — so the selftest asserts
+it never happens.
 
 ## Rendering: one record, two formats
 
-`emit` is the single place that decides between rendering and serialising.
+Nothing below this line touches a JXA object. `emit` is the single place that
+decides between serialising and rendering.
 
 ```bash
 sed -n '/^function emit(/,/^}/p' cx.js
@@ -908,35 +848,89 @@ function emit(format, data, renderText) {
 }
 ```
 
-The text renderer is a lambda, so it is only called when the format is text —
-which is what keeps `--format json` a serialiser of the same record rather than
-a second renderer with its own idea of the data. Every command emits through it.
+```bash
+sed -n '/^function formatTable/,/^}/p' cx.js
+```
 
-Column widths follow the data rather than being fixed.
+```output
+function formatTable(summaries) {
+	if (summaries.length === 0) return "(no contacts)";
+
+	// Widths follow the data rather than being fixed at 10/30/30/18, so a long
+	// email is no longer cut without a trace. Capped so one outlier cannot push
+	// the table off the far side of a terminal. The last column is unpadded and
+	// uncapped, as it always was.
+	const columns = [
+		{ header: "ID", key: "shortId", max: 10 },
+		{ header: "Name", key: "name", max: 34 },
+		{ header: "Email", key: "email", max: 36 },
+		{ header: "Phone", key: "phone", max: 20 },
+		{ header: "Organization", key: "organization" },
+	];
+
+	for (let c = 0; c < columns.length - 1; c++) {
+		let width = columns[c].header.length;
+		for (let i = 0; i < summaries.length; i++) {
+			const value = summaries[i][columns[c].key] || "";
+			if (value.length > width) width = value.length;
+		}
+		columns[c].width = Math.min(width, columns[c].max) + 2;
+	}
+
+	const row = (values) => {
+		let line = "";
+		for (let c = 0; c < columns.length - 1; c++) {
+			line += fit(values[c], columns[c].width);
+		}
+		return line + values[columns.length - 1];
+	};
+
+	const lines = [];
+	const header = row(columns.map((col) => col.header));
+	lines.push(header);
+	lines.push("-".repeat(header.length));
+
+	for (let i = 0; i < summaries.length; i++) {
+		const s = summaries[i];
+		lines.push(row(columns.map((col) => s[col.key] || "")));
+	}
+	return lines.join("\n");
+}
+```
+
+Column widths follow the data rather than being fixed, and `fit` truncates with
+one space kept as a gutter so adjacent columns never run together.
 
 ```bash
-sed -n '/^function fit/,/^}/p' cx.js
+sed -n '/^function fit(/,/^}/p' cx.js
 ```
 
 ```output
 function fit(str, len) {
-	return str.length >= len
-		? `${str.substring(0, len - 1)} `
-		: padRight(str, len);
+	return str.length >= len ? `${str.substring(0, len - 1)} ` : str.padEnd(len);
 }
 ```
 
-`fit` truncates to `len - 1` and leaves a space, so adjacent columns never run
-together even when both overflow. That one-character gutter is `cx`'s own
-decision rather than a language behaviour, which is why the selftest pins it.
+The padding is `String.prototype.padEnd` — there used to be a hand-rolled
+`padRight` here, which is the same function including the no-truncate rule.
+`fit`'s own rule is the part that is `cx`'s decision rather than the language's,
+which is why the selftest pins `fit` and no longer pins the padding.
+
+`--format json` emits the same records the text formatters consume, which is
+what makes it a serialiser rather than a second renderer. It is an **output**
+format only: `cx get --format json` emits the nested read shape, not the flat
+shape `--json` accepts, and piping one into the other is an error naming the
+mismatch rather than a command that exits 0 having changed nothing.
 
 ## Dates: the one that bites
 
-Contacts stores a date-only value at **noon local time**, and that is not an
-implementation detail you can ignore.
+Contacts stores a birthday as a date-only value at **noon local time**.
+`new Date("1990-05-14")` parses as UTC midnight, which is the previous day
+anywhere west of Greenwich. Every date goes through one parser and one
+formatter, and neither is optional.
 
 ```bash
-sed -n '/^function parseDateFlag/,/^}/p' cx.js; echo; sed -n '/^function formatDate/,/^}/p' cx.js
+sed -n '/^function parseDateFlag/,/^}/p' cx.js
 ```
 
 ```output
@@ -958,7 +952,13 @@ function parseDateFlag(str, source) {
 	}
 	return date;
 }
+```
 
+```bash
+sed -n '/^function formatDate/,/^}/p' cx.js
+```
+
+```output
 function formatDate(date) {
 	const month = String(date.getMonth() + 1).padStart(2, "0");
 	const day = String(date.getDate()).padStart(2, "0");
@@ -966,45 +966,29 @@ function formatDate(date) {
 }
 ```
 
-`new Date("1990-05-14")` parses as UTC midnight, which is 13 May anywhere west
-of Greenwich — so a birthday entered as the 14th was stored as the 13th. Both
-functions therefore work in local components only: `parseDateFlag` builds from
-`(year, month-1, day, 12, 0, 0)` and `formatDate` reads `getFullYear` and
-friends, never `toISOString`. Noon gives twelve hours of slack in either
-direction, so no timezone can push the date across a day boundary.
-
-The second check catches `2026-02-30`, which the `Date` constructor silently
-rolls forward to 2 March rather than rejecting.
-
-```bash
-./cx create --first X --birthday '2026-02-30'; ./cx create --first X --birthday '14 May 1990'; true
-```
-
-```output
-error: --birthday is not a real date: 2026-02-30
-error: --birthday must be YYYY-MM-DD, got: 14 May 1990
-```
+`source` names the input in the error — `--birthday` for a flag, `customDates`
+for a payload key — so the message points at what the user actually typed.
 
 ## `label:value` and the one ambiguous grammar
 
 Every repeatable flag takes `label:value`, and the value may itself contain a
-colon. That is the only genuinely ambiguous piece of input `cx` accepts.
+colon. That is the only ambiguous piece of grammar `cx` has.
 
 ```bash
-sed -n '/^function parseLabelValue/,/^}/p' cx.js
+sed -n '/^const SLASHLESS_SCHEMES/,/^}/p' cx.js
 ```
 
 ```output
+const SLASHLESS_SCHEMES = ["tel", "mailto"];
+
 function parseLabelValue(str, defaultLabel) {
 	const colonIdx = str.indexOf(":");
 	if (colonIdx > 0 && colonIdx < str.length - 1) {
 		const beforeColon = str.substring(0, colonIdx);
-		if (
-			beforeColon === "http" ||
-			beforeColon === "https" ||
-			beforeColon === "tel" ||
-			beforeColon === "mailto"
-		) {
+		const looksLikeScheme =
+			/^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(beforeColon) &&
+			str.substr(colonIdx + 1, 2) === "//";
+		if (looksLikeScheme || SLASHLESS_SCHEMES.indexOf(beforeColon) !== -1) {
 			return { label: defaultLabel, value: str };
 		}
 		return {
@@ -1016,19 +1000,34 @@ function parseLabelValue(str, defaultLabel) {
 }
 ```
 
-The disambiguation is a hard-coded list of four schemes. Anything else before
-the first colon becomes a label, so `--url ssh://host` stores `//host` under a
-label named `ssh`, and the same happens for `ftp:`, `sip:`, `xmpp:`, `file:` and
-any custom app scheme. Nothing warns. The rule the code is reaching for is "a
-colon that starts a URI scheme is not a separator"; what it has is the four
-schemes someone needed. That is issue #29.
+The rule being reached for is *a colon that starts a URI scheme is not a label
+separator*. That used to be an allowlist of four schemes, which meant
+`--url ssh://host` stored `//host` under a label named `ssh` — silently, and
+the same for `ftp:`, `sip:`, `xmpp:`, `file:` and every app scheme.
+
+A scheme followed by `//` is now decided by shape. The named pair survives only
+for `tel:` and `mailto:`, where shape alone cannot tell a scheme from a label,
+and that is what the allowlist was genuinely load-bearing for.
+
+Contacts labels come back wrapped as `_$!<Mobile>!$_`; one helper strips that.
+
+```bash
+sed -n '/^function unwrapLabel/,/^}/p' cx.js
+```
+
+```output
+function unwrapLabel(label) {
+	const m = /^_\$!<(.*)>!\$_$/.exec(label);
+	return m ? m[1] : label;
+}
+```
 
 ## Writing
 
-Three writers, one per part of the change record.
+Three writers consume the change record, and nothing else writes.
 
 ```bash
-sed -n '/^function applyScalars/,/^}/p' cx.js; echo; sed -n '/^function applyCollections/,/^}/p' cx.js; echo; sed -n '/^function clearCollection/,/^}/p' cx.js
+sed -n '/^function applyScalars/,/^}/p' cx.js
 ```
 
 ```output
@@ -1038,41 +1037,40 @@ function applyScalars(person, scalars) {
 		person[props[i]] = scalars[props[i]];
 	}
 }
+```
 
+```bash
+sed -n '/^function applyCollections/,/^}/p' cx.js
+```
+
+```output
 function applyCollections(app, person, collections) {
 	for (let i = 0; i < MULTI.length; i++) {
 		const spec = MULTI[i];
-		const change = collections[spec.coll];
-		if (!spec.ctor || !change) continue;
-		if (change.mode === "replace") clearCollection(app, person, spec);
-		for (let j = 0; j < change.items.length; j++) {
+		// `entry`, not `change`: everywhere else in the file `change` is the
+		// whole record buildChange returns. Here it is one {mode, items} pair
+		// for one collection, and reusing the name makes a reader arriving from
+		// cmdUpdate re-derive which is which.
+		const entry = collections[spec.coll];
+		if (!spec.ctor || !entry) continue;
+		if (entry.mode === "replace") clearCollection(app, person, spec);
+		for (let j = 0; j < entry.items.length; j++) {
 			person[spec.coll].push(
 				app[spec.ctor]({
-					label: change.items[j].label,
-					value: change.items[j].value,
+					label: entry.items[j].label,
+					value: entry.items[j].value,
 				}),
 			);
 		}
 	}
 }
-
-function clearCollection(app, person, spec) {
-	const items = person[spec.coll]();
-	// Backwards: deleting shifts the indices of everything after.
-	for (let j = items.length - 1; j >= 0; j--) {
-		app.delete(items[j]);
-	}
-}
 ```
 
-`applyScalars` is three lines because every decision was made upstream — the
-keys are already Contacts property names and the dates are already `Date`
-objects. `applyCollections` is the only collection writer; `mode` tells it what
-to do, so it does not know or care which dialect produced the record.
-`clearCollection` iterates backwards because `app.delete` shifts the indices of
-everything after it.
+One writer for every collection, filtering on `ctor`. There used to be four
+writers over two disjoint key spaces, and which ones ran depended on a `source`
+flag carried down from the parser.
 
-The note gets its own writer, for a reason worth stating.
+The note has its own writer, because it is the one field with no undo.
 
 ```bash
 sed -n '/^function applyNote/,/^}/p' cx.js
@@ -1094,12 +1092,13 @@ function applyNote(person, note) {
 }
 ```
 
-The note is the field the tool exists for, it has no undo, and no other tool on
-the machine backs it up independently. So replacing a non-empty note echoes the
-previous text **to stderr** — it survives in scrollback, and stdout stays clean
-for anything parsing output.
+Replacing a non-empty note echoes the previous text to stderr, so it survives
+in scrollback. `--note` and `--note-append` are contradictory, so giving both
+is an error rather than a silent win for one of them.
 
-And every mutation ends the same way.
+## The invariant after the push
+
+Every mutation ends in `saveOrFail`.
 
 ```bash
 sed -n '/^function saveOrFail/,/^}/p' cx.js
@@ -1115,20 +1114,27 @@ function saveOrFail(app) {
 }
 ```
 
-What `save` actually does is worth getting right, because the answer decides
-whether the ordering rules above are load-bearing. Measured, not inferred: push a
-person and exit without saving, and a **separate process** finds the contact.
-Quit Contacts.app and it is gone. So a mutation goes live in the running app the
-moment it is made, and `save` is what persists it to disk. Neither "it persists"
-nor "it is lost" is true on its own, and for a while this repository asserted
-both, in different files, without flagging it.
+What `save` actually does was measured rather than assumed, because the repo
+had documented both answers at different times:
 
-The consequence is the ordering rule: a failure between `push` and `save` leaves
-a real, findable, half-built contact for the life of the Contacts process.
+**A mutation goes live in the running Contacts.app as it is made; `save`
+persists it to disk.** Push a person without saving and a *separate process*
+finds it. Quit Contacts.app and it is gone.
+
+That has a sharp consequence. A failure between `app.people.push` and
+`saveOrFail` strands a real, findable, half-built contact for the life of the
+Contacts process. So **nothing that can fail may run after the push.** All
+validation lives in `buildChange`, and the three writers contain no
+`exitWithError` between them. Keep it that way.
+
+Worth knowing alongside it: **Contacts validates nothing.**
+`--email "work:))))"` is accepted and stored. `cx` type-checks its input and
+value-checks exactly one thing, dates. A write that succeeded was inspected by
+nobody else.
 
 ## The write commands
 
-Both are now the same three phases — plan, resolve, apply.
+`cmdCreate` and `cmdUpdate` are both thin over the record.
 
 ```bash
 sed -n '/^function cmdCreate/,/^}/p' cx.js
@@ -1175,22 +1181,6 @@ function cmdCreate(args) {
 }
 ```
 
-Read it as three blocks. **Plan** is the first line — `readInput` does all
-parsing, all normalisation, all rejection, and touches nothing. **Resolve** is
-`getApp` and `resolveGroup`, which can still fail with exit 2 or 3, but nothing
-has been mutated. **Apply** starts at `app.Person` and nothing in it calls
-`exitWithError` except `saveOrFail`.
-
-Two details in the middle. A business is a person record flagged `company: true`
-with no personal name — that is how Contacts models it, not a `cx` invention.
-And `organization` goes into `personProps` at push time rather than waiting for
-`applyScalars`: otherwise there is a window where the pushed record has no name
-*and* no organization, making it invisible to every search, including the test
-harness sweeping up after an interrupted run.
-
-`app.add(person, {to: group})` is required for membership. `group.people.push()`
-throws `-1701`.
-
 ```bash
 sed -n '/^function cmdUpdate/,/^}/p' cx.js
 ```
@@ -1224,23 +1214,44 @@ function cmdUpdate(args) {
 }
 ```
 
-Same three blocks, same three writers, in the same order. `cmdUpdate` used to
-branch on which input dialect it received and run only that side's pipeline;
-there is no branch left because there is only one record.
-
-The empty check is what makes exit 0 mean something. A misspelled flag is
-already rejected by the allowlist, but a command naming no field at all would
-otherwise save nothing and report `Updated <name>`.
+Group membership is the one place the obvious call is wrong:
+`app.add(person, {to: group})` works, and `group.people.push()` throws `-1701`.
 
 ## Delete: read before you delete
 
-One JXA rule shapes this whole function.
+Reading a deleted object throws `-1728`, so whatever the confirmation needs has
+to be captured first.
 
 ```bash
-sed -n '/^	app.delete(person);/,/^}/p' cx.js
+sed -n '/^function cmdDelete/,/^}/p' cx.js
 ```
 
 ```output
+function cmdDelete(args) {
+	const parsed = parseArgs(args, 1, KNOWN_FLAGS.delete);
+	if (parsed.positionals.length === 0) {
+		exitWithError("usage: cx delete <id> [--force]", 1);
+	}
+	const format = outputFormat(parsed.flags);
+	const app = getApp();
+	const person = resolveId(app, parsed.positionals[0]);
+	const flags = parsed.flags;
+	const name = person.name() || "(no name)";
+	const id = person.id();
+	const sid = shortId(id);
+
+	if (!flags.force) {
+		const s = readSummary(person);
+		emit(format, { action: "confirmation-required", target: s }, () => {
+			const lines = [`Will delete: ${s.name} (${sid})`];
+			if (s.email) lines.push(`  Email: ${s.email}`);
+			if (s.phone) lines.push(`  Phone: ${s.phone}`);
+			if (s.organization) lines.push(`  Org:   ${s.organization}`);
+			return lines.join("\n");
+		});
+		exitAwaitingConfirmation(format);
+	}
+
 	app.delete(person);
 	saveOrFail(app);
 	// id is read before the delete: reading it after throws -1728, the object
@@ -1253,131 +1264,76 @@ sed -n '/^	app.delete(person);/,/^}/p' cx.js
 }
 ```
 
-`name`, `id` and `sid` are captured *before* `app.delete`. Reading a deleted JXA
-object throws `-1728`, so the report has to be assembled from values taken while
-the object still existed.
-
-Without `--force`, `cmdDelete` prints what it would do and exits 5 — the
-confirmation code — having deleted nothing. That is the same shape `groups
-delete` uses.
+Destructive commands print what they would do and exit 5; `--force` proceeds.
 
 ## Selftest: what it can reach, and why
 
-`cx selftest` runs every pure check in milliseconds with no Contacts permission
-and no address book.
+`cx selftest` has a banner of its own at the end of the file. That is new. It
+used to sit between `readInput` and the first command body, so walking the file
+in execution order meant stepping over roughly 390 lines of fixture —
+`readInput` hands its record to `cmdCreate`, and `cmdCreate` was 200 lines
+further down. Every other transition in this file reads as a call; that one was
+a jump the reader had to take on trust.
+
+Its position now matches what it is. Its reach is exactly the set of functions
+above the Contacts banner, which is the same line this whole document has been
+organised around, and it touches nothing: no permission, no contacts,
+milliseconds.
+
+What it covers is the logic that actually goes wrong — label parsing, column
+fitting, date handling, the whole flag-and-payload mapping, and now the search
+matcher. The checks that earn their place assert `cx`'s own decisions rather
+than the language's: `fit`'s gutter rule, the diacritic behaviour inherited
+from `whose({_contains})`, and the invariant that no `guarded` field is ever
+searchable.
 
 ```bash
-./cx selftest
+sed -n '/no guarded field is searchable/,/);/p' cx.js
 ```
 
 ```output
-selftest: ok
+		"no guarded field is searchable",
+		searchRows(SCALARS)
+			.filter((spec) => spec.guarded)
+			.map((spec) => spec.prop),
+		[],
+	);
 ```
-
-Its reach is exactly the set of functions above the Contacts banner, and that is
-not a coincidence — it is the same property, stated twice. Anything that takes
-plain data and returns plain data can be checked here; anything that touches a
-`person` cannot.
-
-What it covers tells you where the bugs actually live: label parsing, column
-fitting, date round-tripping, and the whole flag-and-payload mapping — every
-rejection, every mode, every date, in both dialects. That last group is recent.
-Before `buildChange` existed there was no function anywhere that took argv and
-returned *what would be written*; the decision and the write were the same
-statements inside `cmdCreate`, so every write-path defect could only be
-confirmed by creating a real contact in someone's address book.
-
-The integration suite is the other half, and it does exactly that.
-
-```bash
-sed -n '/^cleanup() {/,/^}/p' tests/test.sh
-```
-
-```output
-cleanup() {
-	local status=$?
-	echo ""
-	echo "--- Cleanup ---"
-	# Delete by full id, never the short one: resolveId matches on a prefix and
-	# exits 4 when it is ambiguous, which `|| true` would swallow -- silently
-	# leaking the contact this sweep exists to remove.
-	{
-		"$CX" search "$TEST_PREFIX" --format json |
-			/usr/bin/jq -r '.[].id' |
-			while read -r id; do
-				"$CX" delete "$id" --force 2>/dev/null || true
-			done
-	} || true
-	# groups list emits a bare array of names, so the prefix match is ours to
-	# make; read a whole line, since a group name may contain spaces.
-	{
-		"$CX" groups list --format json |
-			/usr/bin/jq -r --arg p "$TEST_PREFIX" '.[] | select(startswith($p))' |
-			while IFS= read -r group; do
-				"$CX" groups delete "$group" --force 2>/dev/null || true
-			done
-	} || true
-	# Say so rather than exiting quietly: a sweep that could not run is the
-	# failure this whole mechanism exists to prevent.
-	local left
-	left=$("$CX" search "$TEST_PREFIX" --format json 2>/dev/null |
-		/usr/bin/jq -r "length" 2>/dev/null) || left=""
-	if [[ "${left:-0}" != "0" ]]; then
-		echo "  WARNING: ${left:-?} contact(s) matching $TEST_PREFIX remain"
-	fi
-	return $status
-}
-```
-
-`tests/test.sh` creates and deletes real contacts in the real address book,
-which is why it cannot run in CI and why its cleanup is built the way it is. It
-asks Contacts what exists under the run's prefix rather than replaying a list it
-built as it went — a prefix is known before the first create, so it cannot be
-outrun by a failure partway through.
-
-Two details are load-bearing rather than defensive. The `|| true` around each
-sweep: under `set -e` a failing command inside an `EXIT` trap aborts the *rest*
-of the trap, so an unguarded contact sweep would skip group cleanup entirely and
-rewrite the script's exit code. And deleting by full `id` rather than short:
-`resolveId` exits 4 on an ambiguous prefix, which `|| true` would swallow —
-leaking the contact the sweep exists to remove.
 
 ## Exit codes
 
-The exit-code set is the tool's real API — more so than the text output, which
-is why `--format json` exists. Every one is reachable without a contact:
+The exit-code set is the API. Changing which input produces which code is a
+breaking change.
 
-```bash
-for c in 'list --format yaml' 'get' 'get zzzzzzzz' 'boguscommand'; do printf '%-22s ' "cx $c"; ./cx $c >/dev/null 2>&1; echo "exit=$?"; done
-```
+    0  success
+    1  error
+    2  permission denied
+    3  not found
+    4  ambiguous ID
+    5  confirmation required
 
-```output
-cx list --format yaml  exit=1
-cx get                 exit=1
-cx get zzzzzzzz        exit=3
-cx boguscommand        exit=1
-```
-
-`0` success, `1` error, `2` permission denied, `3` not found, `4` ambiguous ID,
-`5` confirmation required. Changing which input produces which code is a
-breaking change even though nothing about the text output moved.
+Destructive commands print what they would do and exit 5; re-run with
+`--force`.
 
 ## Where to look first
 
 | If you are changing… | Start at |
 | --- | --- |
-| a contact field — adding, renaming, making one writable | `SCALARS` / `MULTI`. One row. If you find yourself adding a case to a consumer, the row is missing a key. |
+| a contact field | one row in `SCALARS` or `MULTI`. If you are adding a case to a consumer, the row is missing a key. |
 | how input is accepted or rejected | `buildChange`, and `KNOWN_FLAGS` for the flag names. Nothing below the Contacts banner should need to know. |
-| how a card or table looks | `formatCard` / `formatTable`. They take records, never a `person`. |
-| what a command does to Contacts | `cmdCreate` / `cmdUpdate`, and the three `apply*` writers. |
-| performance | `readSummaries`. Plural access is the whole story, and it does not work on a `whose()` specifier. |
+| what `cx search` matches | the `search` key on a catalogue row — and read `searchRows`' comment first, because a `guarded` row there breaks every query for everyone. |
+| how anything renders | the `format*` functions. If you reach for a JXA object there, the record is missing a field. |
+| performance | plural access, and whether the call is on an element collection rather than a `whose()` specifier. For search the cost is the fetch, not the match. |
+| anything that writes | `buildChange` for the validation, and remember that nothing which can fail may run after `app.people.push`. |
 
-Two rules to keep if you change the write path. **Nothing that can fail may run
-after `app.people.push`** — an unsaved push is visible to every other process
-until Contacts.app quits, so a later failure strands a real contact. And
-**every mutation ends in `saveOrFail`**, or the change never reaches disk.
+## Loose ends
 
-Two rules to keep if you change the read path. **`read*` may touch Contacts;
-`format*` may not.** That line is what makes `--format json` a serialiser rather
-than a second renderer, and it is what `cx selftest` runs on.
+Two things the code names as deliberately out of scope, both in search:
+
+- `cx search 5550199` does not find `555-0199`. Not a regression — it found
+  nothing at all before — but it is the most likely first complaint now that
+  phones are nominally searchable.
+- Only the first positional is read. Multi-term AND matching is the mitigation
+  if matching email domains proves too noisy, and `parseArgs` already collects
+  the rest.
 
