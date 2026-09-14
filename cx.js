@@ -3,16 +3,21 @@ ObjC.import("stdlib");
 
 // --- Process I/O: stdin, stdout, stderr, argv, exit ---
 
-function writeStderr(msg) {
-	const stderr = $.NSFileHandle.fileHandleWithStandardError;
+// JXA has no console: a line reaches a pipe only through an NSFileHandle.
+// The two writers differ by handle and nothing else, so the encoding dance
+// lives here once. Both stay function declarations -- the file relies on
+// hoisting throughout, and const arrow bindings do not hoist.
+function writeTo(handle, msg) {
 	const str = $.NSString.alloc.initWithUTF8String(`${msg}\n`);
-	stderr.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
+	handle.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
+}
+
+function writeStderr(msg) {
+	writeTo($.NSFileHandle.fileHandleWithStandardError, msg);
 }
 
 function writeStdout(msg) {
-	const stdout = $.NSFileHandle.fileHandleWithStandardOutput;
-	const str = $.NSString.alloc.initWithUTF8String(`${msg}\n`);
-	stdout.writeData(str.dataUsingEncoding($.NSUTF8StringEncoding));
+	writeTo($.NSFileHandle.fileHandleWithStandardOutput, msg);
 }
 
 function readStdin() {
@@ -107,13 +112,6 @@ function formatDate(date) {
 	return `${date.getFullYear()}-${month}-${day}`;
 }
 
-// Custom dates come back as Date objects; every other multi-value is a string.
-function formatValue(value) {
-	return value && typeof value.getFullYear === "function"
-		? formatDate(value)
-		: value;
-}
-
 // Contacts wraps its built-in labels as _$!<Mobile>!$_. A label the user
 // typed passes through unchanged.
 function unwrapLabel(label) {
@@ -121,17 +119,11 @@ function unwrapLabel(label) {
 	return m ? m[1] : label;
 }
 
-function padRight(str, len) {
-	return str.length >= len ? str : str + " ".repeat(len - str.length);
-}
-
 // Pads to a column width, or truncates to it keeping one space as a gutter.
 // Character counts assume one column per UTF-16 unit, so CJK and emoji names
 // misalign; that is accepted for a personal tool rather than fixed.
 function fit(str, len) {
-	return str.length >= len
-		? `${str.substring(0, len - 1)} `
-		: padRight(str, len);
+	return str.length >= len ? `${str.substring(0, len - 1)} ` : str.padEnd(len);
 }
 
 function formatTable(summaries) {
@@ -187,19 +179,19 @@ function formatCard(record) {
 		const spec = SCALARS[i];
 		if (!spec.display) continue;
 		const value = record.fields[spec.prop];
-		if (value) lines.push(padRight(`${spec.display}:`, 14) + value);
+		if (value) lines.push(`${spec.display}:`.padEnd(14) + value);
 	}
 
 	for (let k = 0; k < MULTI.length; k++) {
 		const items = record.multi[MULTI[k].coll];
 		for (let m = 0; m < items.length; m++) {
-			lines.push(padRight(`${items[m].label}:`, 14) + items[m].value);
+			lines.push(`${items[m].label}:`.padEnd(14) + items[m].value);
 		}
 	}
 
 	const extras = record.addresses.concat(record.socialProfiles);
 	for (let e = 0; e < extras.length; e++) {
-		lines.push(padRight(`${extras[e].label}:`, 14) + extras[e].value);
+		lines.push(`${extras[e].label}:`.padEnd(14) + extras[e].value);
 	}
 
 	if (record.groups.length > 0) {
@@ -431,7 +423,10 @@ const KNOWN_FLAGS = {
 	),
 };
 
-// Contacts properties cx renders but cannot write. Naming them beats dropping
+// Payload keys cx renders but cannot write. Mostly Contacts properties, plus
+// `shortId`, which is cx's own derived field rather than one of theirs -- a
+// caller may well pipe a summary record back in, so it belongs in the list
+// even though nothing in Contacts is called that. Naming them beats dropping
 // them: the README told users to pipe addresses and social profiles, which no
 // writer has ever read.
 const READ_ONLY_KEYS = [
@@ -498,6 +493,9 @@ function buildChange(flags, payload) {
 		scalars: {},
 		note: null,
 		collections: {},
+		// Only cmdCreate ever reads this. `update`'s allowlist rejects --group,
+		// so it is unconditionally null on that path; the record is built the
+		// same way for both rather than branching on the command.
 		group: flags.group || null,
 		format: outputFormat(flags),
 	};
@@ -818,9 +816,14 @@ function readCard(person) {
 		const items = person[spec.coll]();
 		const list = [];
 		for (let m = 0; m < items.length; m++) {
+			const raw = items[m].value();
 			list.push({
 				label: unwrapLabel(items[m].label() || spec.display),
-				value: formatValue(items[m].value()),
+				// The same test the scalar loop above uses. customDates is the one
+				// collection whose values are Date objects, and its row says so --
+				// reading the value to find out let the read and write paths
+				// disagree about what a date field is.
+				value: raw && spec.type === "date" ? formatDate(raw) : raw,
 			});
 		}
 		multi[spec.coll] = list;
@@ -902,14 +905,18 @@ function applyScalars(person, scalars) {
 function applyCollections(app, person, collections) {
 	for (let i = 0; i < MULTI.length; i++) {
 		const spec = MULTI[i];
-		const change = collections[spec.coll];
-		if (!spec.ctor || !change) continue;
-		if (change.mode === "replace") clearCollection(app, person, spec);
-		for (let j = 0; j < change.items.length; j++) {
+		// `entry`, not `change`: everywhere else in the file `change` is the
+		// whole record buildChange returns. Here it is one {mode, items} pair
+		// for one collection, and reusing the name makes a reader arriving from
+		// cmdUpdate re-derive which is which.
+		const entry = collections[spec.coll];
+		if (!spec.ctor || !entry) continue;
+		if (entry.mode === "replace") clearCollection(app, person, spec);
+		for (let j = 0; j < entry.items.length; j++) {
 			person[spec.coll].push(
 				app[spec.ctor]({
-					label: change.items[j].label,
-					value: change.items[j].value,
+					label: entry.items[j].label,
+					value: entry.items[j].value,
 				}),
 			);
 		}
@@ -991,8 +998,6 @@ function cmdSelftest() {
 		"rep mobile",
 	);
 
-	check("padRight pads", padRight("ab", 5), "ab   ");
-	check("padRight does not truncate", padRight("abcdef", 3), "abcdef");
 	check("fit truncates and keeps a gutter", fit("abcdef", 4), "abc ");
 	check("fit pads when short", fit("ab", 4), "ab  ");
 
