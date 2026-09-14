@@ -1,7 +1,7 @@
 ObjC.import("Foundation");
 ObjC.import("stdlib");
 
-// --- Stderr / Stdout helpers ---
+// --- Process I/O: stdin, stdout, stderr, argv, exit ---
 
 function writeStderr(msg) {
 	const stderr = $.NSFileHandle.fileHandleWithStandardError;
@@ -25,7 +25,17 @@ function readStdin() {
 	return ObjC.unwrap(str);
 }
 
-// --- Exit helper ---
+function getArgs() {
+	const allArgs = ObjC.unwrap($.NSProcessInfo.processInfo.arguments);
+	const args = [];
+	let pastSeparator = false;
+	for (let i = 0; i < allArgs.length; i++) {
+		const arg = ObjC.unwrap(allArgs[i]);
+		if (pastSeparator) args.push(arg);
+		else if (arg === "--") pastSeparator = true;
+	}
+	return args;
+}
 
 function exitWithError(message, code) {
 	writeStderr(`error: ${message}`);
@@ -39,53 +49,6 @@ function exitAwaitingConfirmation(format) {
 	$.exit(5);
 }
 
-// --- Contacts.app helpers ---
-
-// Every mutation ends in a save, and a failed save loses the whole change.
-// Report that as such rather than as a raw JXA error.
-function saveOrFail(app) {
-	try {
-		app.save();
-	} catch (e) {
-		exitWithError(`changes may not have been saved: ${e.message}`, 1);
-	}
-}
-
-function findGroup(app, name) {
-	const groups = app.groups.whose({ name: name })();
-	return groups.length > 0 ? groups[0] : null;
-}
-
-function resolveGroup(app, name) {
-	const group = findGroup(app, name);
-	if (!group) exitWithError(`group not found: ${name}`, 3);
-	return group;
-}
-
-// One place decides between rendering and serialising, so --format json is a
-// serialiser rather than a second renderer. Every command emits the same
-// records its formatters consume.
-function outputFormat(flags) {
-	const format = flags.format || "text";
-	if (format !== "text" && format !== "json") {
-		exitWithError(`--format expects text or json, got: ${format}`, 1);
-	}
-	return format;
-}
-
-// Write commands report what they did. In text that is one line; in JSON it
-// is the same facts a caller would otherwise parse back out of that line.
-function emitAction(format, action, person) {
-	const name = person.name() || "(no name)";
-	const id = person.id();
-	const verb = action === "created" ? "Created" : "Updated";
-	emit(
-		format,
-		{ action: action, id: id, shortId: shortId(id), name: name },
-		() => `${verb} ${name} (${shortId(id)})`,
-	);
-}
-
 function emit(format, data, renderText) {
 	writeStdout(format === "json" ? JSON.stringify(data, null, 2) : renderText());
 }
@@ -96,26 +59,12 @@ function printSummaries(summaries, format) {
 	emit(format, summaries, () => formatTable(summaries));
 }
 
-// Application() is lazy: it builds a proxy without contacting Contacts, so a
-// permission denial never surfaced in the try/catch that used to be here.
-// Force one cheap real access instead, so a TCC refusal is caught where it
-// actually happens and reported as exit 2 with the message written for it,
-// rather than as a raw JXA error on whatever the command touched first.
-function getApp() {
-	const app = Application("Contacts");
-	try {
-		app.name();
-	} catch (e) {
-		if (isPermissionError(e)) {
-			exitWithError(
-				"cannot access Contacts.app — grant access in System Settings > Privacy & Security > Automation",
-				2,
-			);
-		}
-		throw e;
-	}
-	return app;
-}
+// --- Pure helpers ---
+//
+// Plain data in, plain data out. Nothing below here until the next banner
+// touches Contacts.app, which is what makes `cx selftest` able to cover it
+// with no permission and no address book. That is the file's one structural
+// line, so the sections draw it rather than grouping by topic.
 
 function isPermissionError(e) {
 	if (e.errorNumber === -1743 || e.errorNumber === -10004) return true;
@@ -165,89 +114,24 @@ function formatValue(value) {
 		: value;
 }
 
-function resolveId(app, idArg) {
-	if (!idArg) exitWithError("missing contact ID", 1);
-
-	// One server-side prefix query handles both forms — a full UUID:ABPerson
-	// id is a prefix of itself — in a single Apple Event. The previous
-	// implementation fetched every person and called id() on each, which is
-	// one round trip per contact and the reason get/update/delete and
-	// groups add/remove all cost ~10s.
-	const matches = app.people.whose({ id: { _beginsWith: idArg } })();
-
-	if (matches.length === 0) {
-		exitWithError(`no contact matching ID ${idArg}`, 3);
-	}
-	if (matches.length > 1) {
-		const lines = [`ambiguous ID ${idArg} matches ${matches.length} contacts:`];
-		for (let j = 0; j < matches.length; j++) {
-			lines.push(`  ${shortId(matches[j].id())}  ${matches[j].name()}`);
-		}
-		exitWithError(lines.join("\n"), 4);
-	}
-	return matches[0];
+// Contacts wraps its built-in labels as _$!<Mobile>!$_. A label the user
+// typed passes through unchanged.
+function unwrapLabel(label) {
+	const m = /^_\$!<(.*)>!\$_$/.exec(label);
+	return m ? m[1] : label;
 }
 
-function readSummary(person) {
-	const name = person.name() || "(no name)";
-	let email = "";
-	let phone = "";
-	const org = person.organization() || "";
-
-	const emails = person.emails();
-	if (emails.length > 0) email = emails[0].value();
-
-	const phones = person.phones();
-	if (phones.length > 0) phone = phones[0].value();
-
-	return {
-		id: person.id(),
-		shortId: shortId(person.id()),
-		name: name,
-		email: email,
-		phone: phone,
-		organization: org,
-	};
+function padRight(str, len) {
+	return str.length >= len ? str : str + " ".repeat(len - str.length);
 }
 
-// One Apple Event per property for a whole collection, instead of one per
-// contact per property. Measured at 341 contacts: five plural calls total
-// ~0.7s, against ~48s for the equivalent per-contact loop.
-//
-// Only valid on an element collection — app.people, or a group's people.
-// Plural access on a whose() specifier measured 13.3s for 256 names, worse
-// than the loop, so cmdSearch keeps readSummary.
-function readSummaries(collection) {
-	const ids = collection.id();
-	const names = collection.name();
-	const orgs = collection.organization();
-	const emails = collection.emails.value();
-	const phones = collection.phones.value();
-
-	// Separate events, paired by index. If Contacts ever returned arrays of
-	// different lengths, pairing them would attribute one person's email to
-	// another, so refuse rather than guess.
-	if (
-		names.length !== ids.length ||
-		orgs.length !== ids.length ||
-		emails.length !== ids.length ||
-		phones.length !== ids.length
-	) {
-		exitWithError("Contacts returned mismatched property arrays", 1);
-	}
-
-	const summaries = [];
-	for (let i = 0; i < ids.length; i++) {
-		summaries.push({
-			id: ids[i],
-			shortId: shortId(ids[i]),
-			name: names[i] || "(no name)",
-			email: emails[i] && emails[i].length > 0 ? emails[i][0] : "",
-			phone: phones[i] && phones[i].length > 0 ? phones[i][0] : "",
-			organization: orgs[i] || "",
-		});
-	}
-	return summaries;
+// Pads to a column width, or truncates to it keeping one space as a gutter.
+// Character counts assume one column per UTF-16 unit, so CJK and emoji names
+// misalign; that is accepted for a personal tool rather than fixed.
+function fit(str, len) {
+	return str.length >= len
+		? `${str.substring(0, len - 1)} `
+		: padRight(str, len);
 }
 
 function formatTable(summaries) {
@@ -294,90 +178,6 @@ function formatTable(summaries) {
 	return lines.join("\n");
 }
 
-function padRight(str, len) {
-	return str.length >= len ? str : str + " ".repeat(len - str.length);
-}
-
-// Pads to a column width, or truncates to it keeping one space as a gutter.
-// Character counts assume one column per UTF-16 unit, so CJK and emoji names
-// misalign; that is accepted for a personal tool rather than fixed.
-function fit(str, len) {
-	return str.length >= len
-		? `${str.substring(0, len - 1)} `
-		: padRight(str, len);
-}
-
-// Contacts wraps its built-in labels as _$!<Mobile>!$_. A label the user
-// typed passes through unchanged.
-function unwrapLabel(label) {
-	const m = /^_\$!<(.*)>!\$_$/.exec(label);
-	return m ? m[1] : label;
-}
-
-// Reading and rendering are separate: readCard turns a live Contacts object
-// into a plain record, formatCard turns that record into text. Nothing below
-// this line touches a JXA object, which is what makes the card renderable
-// without Contacts.app — and serialisable, when --format json arrives.
-function readCard(person) {
-	const fields = {};
-	for (let i = 0; i < SCALARS.length; i++) {
-		const spec = SCALARS[i];
-		let value;
-		if (spec.guarded) {
-			try {
-				value = person[spec.prop]();
-			} catch (_e) {
-				value = null;
-			}
-		} else {
-			value = person[spec.prop]();
-		}
-		fields[spec.prop] =
-			value && spec.type === "date" ? formatDate(value) : value;
-	}
-
-	const multi = {};
-	for (let k = 0; k < MULTI.length; k++) {
-		const spec = MULTI[k];
-		const items = person[spec.coll]();
-		const list = [];
-		for (let m = 0; m < items.length; m++) {
-			list.push({
-				label: unwrapLabel(items[m].label() || spec.display),
-				value: formatValue(items[m].value()),
-			});
-		}
-		multi[spec.coll] = list;
-	}
-
-	const addresses = [];
-	const rawAddresses = person.addresses();
-	for (let a = 0; a < rawAddresses.length; a++) {
-		addresses.push({
-			label: unwrapLabel(rawAddresses[a].label() || "Address"),
-			value: (rawAddresses[a].formattedAddress() || "").replace(/\n/g, ", "),
-		});
-	}
-
-	const socialProfiles = [];
-	const rawSocial = person.socialProfiles();
-	for (let sp = 0; sp < rawSocial.length; sp++) {
-		socialProfiles.push({
-			label: rawSocial[sp].serviceName() || "Social",
-			value: rawSocial[sp].userName() || rawSocial[sp].url() || "",
-		});
-	}
-
-	return {
-		id: person.id(),
-		fields: fields,
-		multi: multi,
-		addresses: addresses,
-		socialProfiles: socialProfiles,
-		groups: person.groups().map((g) => g.name()),
-	};
-}
-
 function formatCard(record) {
 	const lines = [];
 
@@ -415,18 +215,87 @@ function formatCard(record) {
 	return lines.join("\n");
 }
 
-// --- Arg parsing ---
-
-function getArgs() {
-	const allArgs = ObjC.unwrap($.NSProcessInfo.processInfo.arguments);
-	const args = [];
-	let pastSeparator = false;
-	for (let i = 0; i < allArgs.length; i++) {
-		const arg = ObjC.unwrap(allArgs[i]);
-		if (pastSeparator) args.push(arg);
-		else if (arg === "--") pastSeparator = true;
+function parseLabelValue(str, defaultLabel) {
+	const colonIdx = str.indexOf(":");
+	if (colonIdx > 0 && colonIdx < str.length - 1) {
+		const beforeColon = str.substring(0, colonIdx);
+		if (
+			beforeColon === "http" ||
+			beforeColon === "https" ||
+			beforeColon === "tel" ||
+			beforeColon === "mailto"
+		) {
+			return { label: defaultLabel, value: str };
+		}
+		return {
+			label: str.substring(0, colonIdx),
+			value: str.substring(colonIdx + 1),
+		};
 	}
-	return args;
+	return { label: defaultLabel, value: str };
+}
+
+// One place decides between rendering and serialising, so --format json is a
+// serialiser rather than a second renderer. Every command emits the same
+// records its formatters consume.
+function outputFormat(flags) {
+	const format = flags.format || "text";
+	if (format !== "text" && format !== "json") {
+		exitWithError(`--format expects text or json, got: ${format}`, 1);
+	}
+	return format;
+}
+
+const VERSION = "1.0.0";
+
+// The options sections are generated from the catalogues, so the help text
+// cannot drift from the parser. It used to say "[opts]" and stop, leaving
+// eight flags documented nowhere.
+function usage() {
+	const flagsOf = (table) => {
+		const names = [];
+		for (let i = 0; i < table.length; i++) {
+			if (table[i].flag) names.push(table[i].flag);
+		}
+		return names;
+	};
+	const scalars = flagsOf(SCALARS);
+	const multi = flagsOf(MULTI);
+
+	return [
+		"Usage: cx <command> [options]",
+		"",
+		"Commands:",
+		"  list [--group <name>]                    List contacts",
+		"  search <query>                           Search contacts",
+		"  get <id>                                 Show contact details",
+		"  create (--first|--last|--org) ... [opts] Create contact",
+		"  update <id> [opts]                       Update contact",
+		"  delete <id> [--force]                    Delete contact",
+		"  groups list                              List groups",
+		"  groups members <name>                    List group members",
+		"  groups add <id> <group>                  Add contact to group",
+		"  groups remove <id> <group>               Remove contact from group",
+		"  groups create <name>                     Create group",
+		"  groups delete <name> [--force]           Delete group",
+		"  selftest                                 Check the pure helpers",
+		"  --version                                Print the version",
+		"",
+		"Contact fields:",
+		`  ${scalars.map((f) => `--${f}`).join(" ")}`,
+		"",
+		"Repeatable fields, as label:value — repeat for more than one:",
+		`  ${multi.map((f) => `--${f}`).join(" ")}`,
+		"  Example: --email work:me@co.com --email home:me@home.com",
+		"",
+		"Other options:",
+		`  --replace <field>     Empty a collection before adding: ${multi.join(", ")}`,
+		"  --note-append <text>  Append to the note instead of replacing it",
+		"  --group <name>        Add to a group on create, filter on list",
+		"  --json                Read contact JSON from stdin (create, update)",
+		"  --format json         Emit JSON instead of text",
+		"  --force               Confirm a destructive operation",
+	].join("\n");
 }
 
 // One row per single-valued field, in card order. flag is absent where cx can
@@ -788,6 +657,275 @@ function payloadItems(key, spec, value, existing) {
 	return items;
 }
 
+// --- Contacts access ---
+//
+// Every function below talks to Contacts.app. read* return plain records and
+// apply*/clear* take them, so the boundary above is crossed in exactly one
+// direction: records out of read*, records into apply*.
+
+// Application() is lazy: it builds a proxy without contacting Contacts, so a
+// permission denial never surfaced in the try/catch that used to be here.
+// Force one cheap real access instead, so a TCC refusal is caught where it
+// actually happens and reported as exit 2 with the message written for it,
+// rather than as a raw JXA error on whatever the command touched first.
+function getApp() {
+	const app = Application("Contacts");
+	try {
+		app.name();
+	} catch (e) {
+		if (isPermissionError(e)) {
+			exitWithError(
+				"cannot access Contacts.app — grant access in System Settings > Privacy & Security > Automation",
+				2,
+			);
+		}
+		throw e;
+	}
+	return app;
+}
+
+// Every mutation ends in a save, and a failed save loses the whole change.
+// Report that as such rather than as a raw JXA error.
+function saveOrFail(app) {
+	try {
+		app.save();
+	} catch (e) {
+		exitWithError(`changes may not have been saved: ${e.message}`, 1);
+	}
+}
+
+function findGroup(app, name) {
+	const groups = app.groups.whose({ name: name })();
+	return groups.length > 0 ? groups[0] : null;
+}
+
+function resolveGroup(app, name) {
+	const group = findGroup(app, name);
+	if (!group) exitWithError(`group not found: ${name}`, 3);
+	return group;
+}
+
+function resolveId(app, idArg) {
+	if (!idArg) exitWithError("missing contact ID", 1);
+
+	// One server-side prefix query handles both forms — a full UUID:ABPerson
+	// id is a prefix of itself — in a single Apple Event. The previous
+	// implementation fetched every person and called id() on each, which is
+	// one round trip per contact and the reason get/update/delete and
+	// groups add/remove all cost ~10s.
+	const matches = app.people.whose({ id: { _beginsWith: idArg } })();
+
+	if (matches.length === 0) {
+		exitWithError(`no contact matching ID ${idArg}`, 3);
+	}
+	if (matches.length > 1) {
+		const lines = [`ambiguous ID ${idArg} matches ${matches.length} contacts:`];
+		for (let j = 0; j < matches.length; j++) {
+			lines.push(`  ${shortId(matches[j].id())}  ${matches[j].name()}`);
+		}
+		exitWithError(lines.join("\n"), 4);
+	}
+	return matches[0];
+}
+
+function readSummary(person) {
+	const name = person.name() || "(no name)";
+	let email = "";
+	let phone = "";
+	const org = person.organization() || "";
+
+	const emails = person.emails();
+	if (emails.length > 0) email = emails[0].value();
+
+	const phones = person.phones();
+	if (phones.length > 0) phone = phones[0].value();
+
+	return {
+		id: person.id(),
+		shortId: shortId(person.id()),
+		name: name,
+		email: email,
+		phone: phone,
+		organization: org,
+	};
+}
+
+// One Apple Event per property for a whole collection, instead of one per
+// contact per property. Measured at 341 contacts: five plural calls total
+// ~0.7s, against ~48s for the equivalent per-contact loop.
+//
+// Only valid on an element collection — app.people, or a group's people.
+// Plural access on a whose() specifier measured 13.3s for 256 names, worse
+// than the loop, so cmdSearch keeps readSummary.
+function readSummaries(collection) {
+	const ids = collection.id();
+	const names = collection.name();
+	const orgs = collection.organization();
+	const emails = collection.emails.value();
+	const phones = collection.phones.value();
+
+	// Separate events, paired by index. If Contacts ever returned arrays of
+	// different lengths, pairing them would attribute one person's email to
+	// another, so refuse rather than guess.
+	if (
+		names.length !== ids.length ||
+		orgs.length !== ids.length ||
+		emails.length !== ids.length ||
+		phones.length !== ids.length
+	) {
+		exitWithError("Contacts returned mismatched property arrays", 1);
+	}
+
+	const summaries = [];
+	for (let i = 0; i < ids.length; i++) {
+		summaries.push({
+			id: ids[i],
+			shortId: shortId(ids[i]),
+			name: names[i] || "(no name)",
+			email: emails[i] && emails[i].length > 0 ? emails[i][0] : "",
+			phone: phones[i] && phones[i].length > 0 ? phones[i][0] : "",
+			organization: orgs[i] || "",
+		});
+	}
+	return summaries;
+}
+
+// Reading and rendering are separate: readCard turns a live Contacts object
+// into a plain record, formatCard turns that record into text. Nothing below
+// this line touches a JXA object, which is what makes the card renderable
+// without Contacts.app — and serialisable, when --format json arrives.
+function readCard(person) {
+	const fields = {};
+	for (let i = 0; i < SCALARS.length; i++) {
+		const spec = SCALARS[i];
+		let value;
+		if (spec.guarded) {
+			try {
+				value = person[spec.prop]();
+			} catch (_e) {
+				value = null;
+			}
+		} else {
+			value = person[spec.prop]();
+		}
+		fields[spec.prop] =
+			value && spec.type === "date" ? formatDate(value) : value;
+	}
+
+	const multi = {};
+	for (let k = 0; k < MULTI.length; k++) {
+		const spec = MULTI[k];
+		const items = person[spec.coll]();
+		const list = [];
+		for (let m = 0; m < items.length; m++) {
+			list.push({
+				label: unwrapLabel(items[m].label() || spec.display),
+				value: formatValue(items[m].value()),
+			});
+		}
+		multi[spec.coll] = list;
+	}
+
+	const addresses = [];
+	const rawAddresses = person.addresses();
+	for (let a = 0; a < rawAddresses.length; a++) {
+		addresses.push({
+			label: unwrapLabel(rawAddresses[a].label() || "Address"),
+			value: (rawAddresses[a].formattedAddress() || "").replace(/\n/g, ", "),
+		});
+	}
+
+	const socialProfiles = [];
+	const rawSocial = person.socialProfiles();
+	for (let sp = 0; sp < rawSocial.length; sp++) {
+		socialProfiles.push({
+			label: rawSocial[sp].serviceName() || "Social",
+			value: rawSocial[sp].userName() || rawSocial[sp].url() || "",
+		});
+	}
+
+	return {
+		id: person.id(),
+		fields: fields,
+		multi: multi,
+		addresses: addresses,
+		socialProfiles: socialProfiles,
+		groups: person.groups().map((g) => g.name()),
+	};
+}
+
+// Write commands report what they did. In text that is one line; in JSON it
+// is the same facts a caller would otherwise parse back out of that line.
+function emitAction(format, action, person) {
+	const name = person.name() || "(no name)";
+	const id = person.id();
+	const verb = action === "created" ? "Created" : "Updated";
+	emit(
+		format,
+		{ action: action, id: id, shortId: shortId(id), name: name },
+		() => `${verb} ${name} (${shortId(id)})`,
+	);
+}
+
+// The note is the field cx exists to reach — it is the whole reason for
+// choosing JXA over CNContactStore — and the one no other tool on the machine
+// backs up independently. Replacing a non-empty note echoes the previous text
+// to stderr so it survives in scrollback; append mode adds to it instead.
+// stdout is untouched, so anything parsing output is unaffected.
+function applyNote(person, note) {
+	if (!note) return;
+	if (note.mode === "append") {
+		const existing = person.note() || "";
+		person.note = existing ? `${existing}\n${note.text}` : note.text;
+		return;
+	}
+	const existing = person.note();
+	if (existing && existing !== note.text) {
+		writeStderr(`previous note for ${shortId(person.id())}:\n${existing}`);
+	}
+	person.note = note.text;
+}
+
+// The change record is already keyed by Contacts property name and its dates
+// are already Date objects, so there is nothing left to decide here.
+function applyScalars(person, scalars) {
+	const props = Object.keys(scalars);
+	for (let i = 0; i < props.length; i++) {
+		person[props[i]] = scalars[props[i]];
+	}
+}
+
+// The single collection writer. Both input dialects reach it through the same
+// record, so the mode says what to do rather than which parser produced it --
+// there used to be four writers over two disjoint key spaces, and which ones
+// ran depended on a source flag carried down from readInput.
+function applyCollections(app, person, collections) {
+	for (let i = 0; i < MULTI.length; i++) {
+		const spec = MULTI[i];
+		const change = collections[spec.coll];
+		if (!spec.ctor || !change) continue;
+		if (change.mode === "replace") clearCollection(app, person, spec);
+		for (let j = 0; j < change.items.length; j++) {
+			person[spec.coll].push(
+				app[spec.ctor]({
+					label: change.items[j].label,
+					value: change.items[j].value,
+				}),
+			);
+		}
+	}
+}
+
+function clearCollection(app, person, spec) {
+	const items = person[spec.coll]();
+	// Backwards: deleting shifts the indices of everything after.
+	for (let j = items.length - 1; j >= 0; j--) {
+		app.delete(items[j]);
+	}
+}
+
+// --- Commands and dispatch ---
+
 // A three-line shell around buildChange: read argv, read stdin, normalise.
 // Only this function touches stdin, which is why the logic is not in it.
 function readInput(command, args, startIndex) {
@@ -807,62 +945,6 @@ function readInput(command, args, startIndex) {
 		positionals: parsed.positionals,
 	};
 }
-
-// --- Usage ---
-
-const VERSION = "1.0.0";
-
-// The options sections are generated from the catalogues, so the help text
-// cannot drift from the parser. It used to say "[opts]" and stop, leaving
-// eight flags documented nowhere.
-function usage() {
-	const flagsOf = (table) => {
-		const names = [];
-		for (let i = 0; i < table.length; i++) {
-			if (table[i].flag) names.push(table[i].flag);
-		}
-		return names;
-	};
-	const scalars = flagsOf(SCALARS);
-	const multi = flagsOf(MULTI);
-
-	return [
-		"Usage: cx <command> [options]",
-		"",
-		"Commands:",
-		"  list [--group <name>]                    List contacts",
-		"  search <query>                           Search contacts",
-		"  get <id>                                 Show contact details",
-		"  create (--first|--last|--org) ... [opts] Create contact",
-		"  update <id> [opts]                       Update contact",
-		"  delete <id> [--force]                    Delete contact",
-		"  groups list                              List groups",
-		"  groups members <name>                    List group members",
-		"  groups add <id> <group>                  Add contact to group",
-		"  groups remove <id> <group>               Remove contact from group",
-		"  groups create <name>                     Create group",
-		"  groups delete <name> [--force]           Delete group",
-		"  selftest                                 Check the pure helpers",
-		"  --version                                Print the version",
-		"",
-		"Contact fields:",
-		`  ${scalars.map((f) => `--${f}`).join(" ")}`,
-		"",
-		"Repeatable fields, as label:value — repeat for more than one:",
-		`  ${multi.map((f) => `--${f}`).join(" ")}`,
-		"  Example: --email work:me@co.com --email home:me@home.com",
-		"",
-		"Other options:",
-		`  --replace <field>     Empty a collection before adding: ${multi.join(", ")}`,
-		"  --note-append <text>  Append to the note instead of replacing it",
-		"  --group <name>        Add to a group on create, filter on list",
-		"  --json                Read contact JSON from stdin (create, update)",
-		"  --format json         Emit JSON instead of text",
-		"  --force               Confirm a destructive operation",
-	].join("\n");
-}
-
-// --- Selftest ---
 
 // Everything below the read/render boundary is a pure function of plain data,
 // so it can be checked without Contacts.app, without permission, and without
@@ -1083,138 +1165,6 @@ function cmdSelftest() {
 	writeStdout("selftest: ok");
 }
 
-// --- Command dispatch ---
-
-function main() {
-	const args = getArgs();
-	if (args.length === 0) {
-		writeStdout(usage());
-		return;
-	}
-
-	const command = args[0];
-
-	switch (command) {
-		case "list":
-			cmdList(args);
-			break;
-		case "search":
-			cmdSearch(args);
-			break;
-		case "get":
-			cmdGet(args);
-			break;
-		case "create":
-			cmdCreate(args);
-			break;
-		case "update":
-			cmdUpdate(args);
-			break;
-		case "delete":
-			cmdDelete(args);
-			break;
-		case "groups":
-			cmdGroups(args);
-			break;
-		case "selftest":
-			cmdSelftest();
-			break;
-		case "version":
-		case "--version":
-		case "-v":
-			writeStdout(`cx ${VERSION}`);
-			break;
-		case "help":
-		case "--help":
-		case "-h":
-			writeStdout(usage());
-			break;
-		default:
-			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
-	}
-}
-
-// --- Multi-value field helpers ---
-
-function parseLabelValue(str, defaultLabel) {
-	const colonIdx = str.indexOf(":");
-	if (colonIdx > 0 && colonIdx < str.length - 1) {
-		const beforeColon = str.substring(0, colonIdx);
-		if (
-			beforeColon === "http" ||
-			beforeColon === "https" ||
-			beforeColon === "tel" ||
-			beforeColon === "mailto"
-		) {
-			return { label: defaultLabel, value: str };
-		}
-		return {
-			label: str.substring(0, colonIdx),
-			value: str.substring(colonIdx + 1),
-		};
-	}
-	return { label: defaultLabel, value: str };
-}
-
-// The note is the field cx exists to reach — it is the whole reason for
-// choosing JXA over CNContactStore — and the one no other tool on the machine
-// backs up independently. Replacing a non-empty note echoes the previous text
-// to stderr so it survives in scrollback; append mode adds to it instead.
-// stdout is untouched, so anything parsing output is unaffected.
-function applyNote(person, note) {
-	if (!note) return;
-	if (note.mode === "append") {
-		const existing = person.note() || "";
-		person.note = existing ? `${existing}\n${note.text}` : note.text;
-		return;
-	}
-	const existing = person.note();
-	if (existing && existing !== note.text) {
-		writeStderr(`previous note for ${shortId(person.id())}:\n${existing}`);
-	}
-	person.note = note.text;
-}
-
-// The change record is already keyed by Contacts property name and its dates
-// are already Date objects, so there is nothing left to decide here.
-function applyScalars(person, scalars) {
-	const props = Object.keys(scalars);
-	for (let i = 0; i < props.length; i++) {
-		person[props[i]] = scalars[props[i]];
-	}
-}
-
-// The single collection writer. Both input dialects reach it through the same
-// record, so the mode says what to do rather than which parser produced it --
-// there used to be four writers over two disjoint key spaces, and which ones
-// ran depended on a source flag carried down from readInput.
-function applyCollections(app, person, collections) {
-	for (let i = 0; i < MULTI.length; i++) {
-		const spec = MULTI[i];
-		const change = collections[spec.coll];
-		if (!spec.ctor || !change) continue;
-		if (change.mode === "replace") clearCollection(app, person, spec);
-		for (let j = 0; j < change.items.length; j++) {
-			person[spec.coll].push(
-				app[spec.ctor]({
-					label: change.items[j].label,
-					value: change.items[j].value,
-				}),
-			);
-		}
-	}
-}
-
-function clearCollection(app, person, spec) {
-	const items = person[spec.coll]();
-	// Backwards: deleting shifts the indices of everything after.
-	for (let j = items.length - 1; j >= 0; j--) {
-		app.delete(items[j]);
-	}
-}
-
-// --- Commands ---
-
 function cmdList(args) {
 	const flags = parseArgs(args, 1, KNOWN_FLAGS.list).flags;
 	const format = outputFormat(flags);
@@ -1226,6 +1176,7 @@ function cmdList(args) {
 
 	printSummaries(readSummaries(collection), format);
 }
+
 function cmdSearch(args) {
 	const parsed = parseArgs(args, 1, KNOWN_FLAGS.search);
 	const format = outputFormat(parsed.flags);
@@ -1251,6 +1202,7 @@ function cmdSearch(args) {
 
 	printSummaries(summaries, format);
 }
+
 function cmdGet(args) {
 	const parsed = parseArgs(args, 1, KNOWN_FLAGS.get);
 	const format = outputFormat(parsed.flags);
@@ -1259,6 +1211,7 @@ function cmdGet(args) {
 	const record = readCard(resolveId(app, parsed.positionals[0]));
 	emit(format, record, () => formatCard(record));
 }
+
 function cmdCreate(args) {
 	const change = readInput("create", args, 1).change;
 
@@ -1360,6 +1313,7 @@ function cmdDelete(args) {
 		() => `Deleted ${name} (${sid})`,
 	);
 }
+
 function cmdGroups(args) {
 	const parsed = parseArgs(args, 1, KNOWN_FLAGS.groups);
 	if (parsed.positionals.length === 0) {
@@ -1469,6 +1423,55 @@ function groupsDelete(app, name, flags, format) {
 		{ action: "group-deleted", group: name },
 		() => `Deleted group: ${name}`,
 	);
+}
+
+function main() {
+	const args = getArgs();
+	if (args.length === 0) {
+		writeStdout(usage());
+		return;
+	}
+
+	const command = args[0];
+
+	switch (command) {
+		case "list":
+			cmdList(args);
+			break;
+		case "search":
+			cmdSearch(args);
+			break;
+		case "get":
+			cmdGet(args);
+			break;
+		case "create":
+			cmdCreate(args);
+			break;
+		case "update":
+			cmdUpdate(args);
+			break;
+		case "delete":
+			cmdDelete(args);
+			break;
+		case "groups":
+			cmdGroups(args);
+			break;
+		case "selftest":
+			cmdSelftest();
+			break;
+		case "version":
+		case "--version":
+		case "-v":
+			writeStdout(`cx ${VERSION}`);
+			break;
+		case "help":
+		case "--help":
+		case "-h":
+			writeStdout(usage());
+			break;
+		default:
+			exitWithError(`unknown command: ${command}\n\n${usage()}`, 1);
+	}
 }
 
 // --- Run ---
