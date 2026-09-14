@@ -207,16 +207,25 @@ function formatCard(record) {
 	return lines.join("\n");
 }
 
+// Every repeatable flag takes label:value, and the value may itself contain a
+// colon, so this is the only ambiguous piece of grammar cx has. The rule it is
+// reaching for is "a colon that starts a URI scheme is not a label separator".
+//
+// A scheme followed by // is decided by shape, because the alternative is a
+// list of the schemes someone happened to need: --url ssh://host used to store
+// //host under a label named ssh, and so did ftp:, sip:, xmpp:, file: and every
+// app scheme. The named pair stays for the two that carry no slashes, where
+// shape alone cannot tell mailto:a@b.com from a label called mailto.
+const SLASHLESS_SCHEMES = ["tel", "mailto"];
+
 function parseLabelValue(str, defaultLabel) {
 	const colonIdx = str.indexOf(":");
 	if (colonIdx > 0 && colonIdx < str.length - 1) {
 		const beforeColon = str.substring(0, colonIdx);
-		if (
-			beforeColon === "http" ||
-			beforeColon === "https" ||
-			beforeColon === "tel" ||
-			beforeColon === "mailto"
-		) {
+		const looksLikeScheme =
+			/^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(beforeColon) &&
+			str.substr(colonIdx + 1, 2) === "//";
+		if (looksLikeScheme || SLASHLESS_SCHEMES.indexOf(beforeColon) !== -1) {
 			return { label: defaultLabel, value: str };
 		}
 		return {
@@ -985,6 +994,35 @@ function cmdSelftest() {
 		"parseLabelValue labels a URL when asked",
 		parseLabelValue("site:https://example.com", "home"),
 		{ label: "site", value: "https://example.com" },
+	);
+	// The reported class: any scheme that is not one of the four someone
+	// happened to list used to be split, storing //host under a label.
+	check(
+		"parseLabelValue leaves an unlisted scheme alone",
+		parseLabelValue("ssh://host", "home"),
+		{ label: "home", value: "ssh://host" },
+	);
+	check(
+		"parseLabelValue labels an unlisted scheme when asked",
+		parseLabelValue("work:ssh://host", "home"),
+		{ label: "work", value: "ssh://host" },
+	);
+	// Shape alone cannot tell these from a label, so the named pair stays.
+	check(
+		"parseLabelValue leaves a slashless scheme alone",
+		parseLabelValue("mailto:a@b.com", "home"),
+		{ label: "home", value: "mailto:a@b.com" },
+	);
+	check(
+		"parseLabelValue leaves tel alone",
+		parseLabelValue("tel:+15550100", "home"),
+		{ label: "home", value: "tel:+15550100" },
+	);
+	// A label is user prose, so it keeps splitting even before a slash pair.
+	check(
+		"parseLabelValue splits a label that is not scheme-shaped",
+		parseLabelValue("my note://x", "home"),
+		{ label: "my note", value: "//x" },
 	);
 
 	check(
