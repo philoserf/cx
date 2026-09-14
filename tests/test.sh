@@ -230,6 +230,22 @@ assert_contains "Verification" "$output"
 # whenever the input was JSON.
 assert_contains "${JSON_PREFIX}-home@example.com" "$output"
 
+# urls, relatedNames and customDates reach Contacts now. Their MULTI rows had
+# no json key, and both JSON writers filtered on that key, so a payload naming
+# them was parsed and then silently discarded.
+printf '{"urls":[{"label":"homepage","value":"https://example.com/%s"}],"relatedNames":[{"label":"friend","value":"Ada L"}],"customDates":[{"label":"anniversary","value":"2011-07-08"}]}' "$JSON_PREFIX" | "$CX" update "$JSON_ID" --json
+output=$("$CX" get "$JSON_ID" 2>&1)
+assert_contains "https://example.com/${JSON_PREFIX}" "$output"
+assert_contains "Ada L" "$output"
+assert_contains "2011-07-08" "$output"
+
+# A repeatable flag alongside --json used to be dropped: cmdUpdate branched on
+# which dialect the input arrived in and ran only that pipeline.
+printf '{"note":"both dialects"}' | "$CX" update "$JSON_ID" --json --phone "work:555-0111"
+output=$("$CX" get "$JSON_ID" 2>&1)
+assert_contains "both dialects" "$output"
+assert_contains "555-0111" "$output"
+
 # --- Test: list ---
 # The only coverage of cmdList. Slow (~70s on a real address book) until the
 # bulk-fetch work in commit E1 lands.
@@ -367,7 +383,17 @@ assert_not_contains "${REP_PREFIX}a@example.com" "$output"
 output=$("$CX" get "$REP_ID" 2>&1)
 assert_not_contains "${REP_PREFIX}c@example.com" "$output"
 
-assert_exit 1 "$CX" update "$REP_ID" --replace bogusfield
+# A rejected --replace must not have written the scalars and the note first.
+"$CX" update "$REP_ID" --note "guard note" --org "Guard Co" >/dev/null
+assert_exit 1 "$CX" update "$REP_ID" --note "clobbered" --replace bogusfield
+output=$("$CX" get "$REP_ID" 2>&1)
+assert_contains "guard note" "$output"
+assert_not_contains "clobbered" "$output"
+
+# The README teaches the plural payload spelling, so --replace accepts it.
+"$CX" update "$REP_ID" --replace emails --email "work:${REP_PREFIX}d@example.com"
+output=$("$CX" get "$REP_ID" 2>&1)
+assert_contains "${REP_PREFIX}d@example.com" "$output"
 
 # --- Test: company contact ---
 # Contacts models a business as a company-flagged record with no personal
@@ -407,6 +433,45 @@ assert_contains "confirmation-required" "$output"
 assert_exit 5 "$CX" delete "$FMT_ID" --format json
 
 assert_exit 1 "$CX" get "$FMT_ID" --format yaml
+
+# --- Test: input validation ---
+# All of these exit before getApp(), so the block costs nothing and touches no
+# contact. Each one used to be accepted: a misspelled flag wrote nothing and
+# reported success, a zero-field update did the same, and a payload naming a
+# key cx cannot write was dropped without a word.
+echo ""
+echo "=== Input validation ==="
+VPREFIX="${TEST_PREFIX}Inv"
+
+# Unknown flags, per command.
+assert_exit 1 "$CX" get "$JSON_ID" --json
+assert_exit 1 "$CX" update "$JSON_ID" --nte "text"
+assert_exit 1 "$CX" list --grup Friends
+assert_exit 1 "$CX" create --first "$VPREFIX" --replace email
+assert_exit 1 "$CX" create --first "$VPREFIX" --bogus 1
+
+# Exit 0 from update now means something actually changed.
+assert_exit 1 "$CX" update "$JSON_ID"
+
+# Contradictory rather than silently resolved in the append's favour.
+assert_exit 1 "$CX" update "$JSON_ID" --note a --note-append b
+
+# --format is rejected before the write, not after it.
+assert_exit 1 "$CX" create --first "$VPREFIX" --format yaml
+output=$("$CX" search "$VPREFIX" 2>&1)
+assert_not_contains "$VPREFIX" "$output"
+
+# A payload has to be an object, and every key has to be one cx can write.
+assert_exit 1 bash -c "echo null    | '$CX' create --json"
+assert_exit 1 bash -c "echo '[1,2]' | '$CX' create --json"
+assert_exit 1 bash -c "echo 5       | '$CX' create --json"
+assert_exit 1 bash -c "echo '{\"firstName\":\"X\",\"nonsense\":1}' | '$CX' create --json"
+assert_exit 1 bash -c "echo '{\"firstName\":\"X\",\"addresses\":[]}' | '$CX' create --json"
+assert_exit 1 bash -c "echo '{\"firstName\":\"X\",\"emails\":\"a@b.co\"}' | '$CX' create --json"
+
+# The cx get envelope is diagnosed by name rather than accepted and ignored.
+output=$("$CX" get "$JSON_ID" --format json | "$CX" update "$JSON_ID" --json 2>&1 || true)
+assert_contains "nested record" "$output"
 
 # --- Test: ambiguous ID ---
 # Assumes at least two contacts share the leading hex digit of JSON_ID, which
