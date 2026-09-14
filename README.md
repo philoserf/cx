@@ -45,18 +45,35 @@ cx update a1b2c3d4 --replace email --email work:new@co.com   # exactly one email
 cx update a1b2c3d4 --replace phone                           # no phones left
 ```
 
-For complex input (addresses, social profiles), pipe JSON via stdin. JSON
-*replaces* any collection it names, where flag input appends:
+`--replace` takes either spelling — the flag name (`email`) or the payload key
+(`emails`). It is validated before anything is written, so a name it does not
+recognise is an error that leaves the contact untouched.
+
+Pipe JSON via stdin to set labels without shell quoting, or several fields in
+one call. JSON _replaces_ any collection it names, where flag input appends:
 
 ```bash
 echo '{"firstName":"Jane","lastName":"Doe","emails":[{"label":"work","value":"jane@co.com"}]}' | cx create --json
 ```
 
+The payload is a flat object keyed by Contacts property names — `firstName`,
+`organization`, `emails`, `urls`, `relatedNames`, `customDates`. Flags given
+alongside `--json` still apply. Where both name the same collection the
+payload's replace wins and both sets of values land in it; where only a flag
+names one, it appends as usual.
+
+**Addresses, social profiles and instant messages are rendered but not
+writable.** `cx get` shows them; no input mode sets them, and a payload naming
+one is rejected rather than silently dropped. Contacts models an address as a
+record of street, city, state, zip and country rather than the `label`/`value`
+pair every writable collection uses, so it needs a shape `cx` does not have.
+
 ### The note
 
 The note is the field this tool exists to reach, and it has no undo. Replacing a
 non-empty note echoes the previous text to stderr so it survives in scrollback,
-and `--note-append` adds a line instead of replacing.
+and `--note-append` adds a line instead of replacing. The two are contradictory,
+so giving both in one call is an error rather than a silent win for one of them.
 
 ### JSON output
 
@@ -68,9 +85,20 @@ cx search jane --format json
 cx get a1b2c3d4 --format json
 ```
 
+`--format json` is an **output** format only, and does not round trip.
+`cx get --format json` emits a nested record — `id`, `fields`, `multi`,
+`addresses`, `socialProfiles`, `groups` — which is the shape the renderers
+consume, not the flat shape `--json` reads. Piping one into the other is an
+error naming the mismatch rather than a command that exits 0 having changed
+nothing.
+
 Exit codes: 0 success, 1 error, 2 permission denied, 3 not found, 4 ambiguous
 ID, 5 confirmation required. Destructive commands print what they would do and
 exit 5; re-run with `--force` to proceed.
+
+A flag a command does not read is an error, and so is an update that names no
+field, so exit 0 from a write always means something changed. Every input is validated before Contacts
+is opened, so a command rejected for bad input has written nothing.
 
 ## Why JXA?
 
@@ -78,28 +106,30 @@ Apple's `CNContactStore` requires the `com.apple.developer.contacts.notes` entit
 
 ## Performance
 
-Benchmarks with 343 contacts (2026-09-02, Apple M4):
+Benchmarks with 340 contacts (2026-09-14, Apple M4):
 
 | Command        | Time  |
 | -------------- | ----- |
 | list           | 0.76s |
-| search (hit)   | 0.93s |
-| search (miss)  | 0.50s |
-| create         | 1.07s |
-| get            | 0.99s |
-| update         | 0.77s |
-| delete         | 0.96s |
-| groups create  | 0.35s |
-| groups list    | 0.23s |
-| groups add     | 1.20s |
-| groups members | 0.31s |
-| groups remove  | 1.28s |
+| search (hit)   | 0.85s |
+| search (miss)  | 0.51s |
+| create         | 0.97s |
+| get            | 0.92s |
+| update         | 0.58s |
+| delete         | 0.92s |
+| groups create  | 0.37s |
+| groups list    | 0.22s |
+| groups add     | 1.39s |
+| groups members | 0.35s |
+| groups remove  | 1.13s |
 | groups delete  | 0.34s |
 
-Nothing is above 1.3s, and roughly half of each figure is `osascript` startup.
+Nothing is above 1.4s, and roughly half of each figure is `osascript` startup.
 Earlier versions took 47s for `list` and ~10s for every command that resolved a
 short ID, because each contact property was a separate Apple Event. Both paths
-now ask Contacts for a whole collection at once. Run `task bench` to regenerate.
+now ask Contacts for a whole collection at once. Run `task bench` to regenerate. The
+hit row queries a contact the benchmark creates and the miss row a string that
+matches nothing, so the split means the same thing on any machine.
 
 ## Development
 
@@ -110,10 +140,15 @@ task fmt      # Auto-format shell scripts and JS
 task bench    # Benchmark commands
 ```
 
-`cx selftest` checks the pure helpers — label parsing, column fitting, date
-handling, rendering — against literal inputs. It needs no automation permission
-and touches no contacts. The integration suite in `tests/test.sh` does exercise
-real Contacts.app data, creating and deleting contacts prefixed `CxTest_<pid>`.
+`cx selftest` checks the pure helpers against literal inputs — label parsing,
+column fitting, date handling, rendering, and the whole flag-and-payload mapping
+that turns argv and stdin into a change record. It needs no automation
+permission and touches no contacts.
+
+The integration suite in `tests/test.sh` does exercise real Contacts.app data,
+creating contacts prefixed `CxTest_<pid>_`. It cleans up by searching that
+prefix rather than by replaying a list it built as it went, so an interrupted or
+failed run still leaves the address book as it found it.
 
 Requires macOS with Contacts automation permission granted. `task lint` needs
 shellcheck, shfmt and bun; `task bench` needs `gdate` from coreutils.
