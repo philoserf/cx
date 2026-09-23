@@ -14,8 +14,7 @@ expensive to rediscover. It deliberately does not restate the design.
 - **`THEORY.md`** — what you need to understand to change this without damaging it.
   The organizing ideas, the invariants, the seams, and what is easy versus hard.
   **Read it before changing the write path or the catalogues.**
-- **`WALKTHROUGH.md`** — how a command runs, in order, with executable snippets.
-  `uvx showboat verify WALKTHROUGH.md` re-runs every block.
+- **`WALKTHROUGH.md`** — how a command runs, in order, with snippets.
 - **`README.md`** — the user-facing interface and the performance table.
 
 If something here and `THEORY.md` disagree, `THEORY.md` is the considered account
