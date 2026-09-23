@@ -1,5 +1,7 @@
 # cx
 
+![Status: Stable](https://img.shields.io/badge/Status-Stable-brightgreen.svg)
+
 A macOS command-line tool for managing Apple Contacts. Built with JXA (JavaScript for Automation) for full access to all contact properties, including notes.
 
 ## Install
