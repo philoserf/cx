@@ -329,8 +329,10 @@ code that touches Contacts has nowhere to stand" used to be true of the entire w
 Half of it is now false: the decision about what to write is a pure function and is tested as
 one. What remains true is the other half — the code that drives JXA once the decision is
 made is still only reachable through `tests/test.sh` against a real address book, which is
-why that harness cleans up by prefix rather than by a list it built as it went, and why its
-cleanup guards are load-bearing rather than defensive.
+why that harness cleans up by prefix rather than by a list it built as it went, why its
+cleanup guards are load-bearing rather than defensive, and why it starts by sweeping the
+prefixes of earlier runs whose process has exited — a run whose own sweep failed has no
+other way to be cleaned up.
 
 A maintainer who did not hold this theory would most plausibly cause damage by: bypassing
 `resolveId` for speed and losing the ambiguity contract; deleting `readSummary` as a
