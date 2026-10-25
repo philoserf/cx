@@ -173,7 +173,9 @@ permission and touches no contacts.
 The integration suite in `tests/test.sh` does exercise real Contacts.app data,
 creating contacts prefixed `CxTest_<pid>_`. It cleans up by searching that
 prefix rather than by replaying a list it built as it went, so an interrupted or
-failed run still leaves the address book as it found it.
+failed run still leaves the address book as it found it. If that sweep itself
+fails, the next run deletes the leftovers: it starts by sweeping the prefix of
+every earlier run whose process has exited.
 
 Requires macOS with Contacts automation permission granted. `task setup`
 installs the rest from the `Brewfile`: shellcheck, shfmt and bun for `task lint`,

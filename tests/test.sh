@@ -50,16 +50,54 @@ cleanup() {
 			done
 	} || true
 	# Say so rather than exiting quietly: a sweep that could not run is the
-	# failure this whole mechanism exists to prevent.
+	# failure this whole mechanism exists to prevent. An empty count means the
+	# query itself failed, and that is unknown, not clean.
 	local left
 	left=$("$CX" search "$TEST_PREFIX" --format json 2>/dev/null |
 		/usr/bin/jq -r "length" 2>/dev/null) || left=""
-	if [[ "${left:-0}" != "0" ]]; then
+	if [[ "$left" != "0" ]]; then
 		echo "  WARNING: ${left:-?} contact(s) matching $TEST_PREFIX remain"
 	fi
 	return $status
 }
 trap cleanup EXIT
+
+# A run whose sweep failed strands its contacts for good: no later run has its
+# pid. So first delete what dead runs of either harness left behind. A pid
+# that is still running keeps its contacts -- that is the concurrency
+# invariant above. The match is on a name that is exactly the harness shape,
+# which is narrower than the per-run sweep's search over every field; a
+# CxTest_ name without a pid is listed and left alone. `ps -p` rather than
+# `kill -0`, which fails on another user's live process.
+sweep_stale() {
+	local stem kind id name pid
+	# `|| true` for the same reason as in cleanup: housekeeping that cannot
+	# reach Contacts must not abort the suite before it starts.
+	for stem in CxTest_ CxBench_; do
+		{
+			"$CX" search "$stem" --format json |
+				/usr/bin/jq -r --arg s "$stem" \
+					'.[] | select(.name | startswith($s)) | "contact\t\(.id)\t\(.name)"'
+			"$CX" groups list --format json |
+				/usr/bin/jq -r --arg s "$stem" \
+					'.[] | select(startswith($s)) | "group\t\(.)\t\(.)"'
+		} | while IFS=$'\t' read -r kind id name; do
+			if [[ ! "$name" =~ ^Cx(Test|Bench)_([0-9]+)_ ]]; then
+				echo "  NOTE: left alone, no pid in name: $name"
+				continue
+			fi
+			pid=${BASH_REMATCH[2]}
+			ps -p "$pid" >/dev/null 2>&1 && continue
+			if [[ "$kind" == contact ]]; then
+				"$CX" delete "$id" --force 2>/dev/null || true
+			else
+				"$CX" groups delete "$id" --force 2>/dev/null || true
+			fi
+		done || true
+	done
+}
+echo "--- Stale sweep ---"
+sweep_stale
 
 assert_exit() {
 	local expected="$1"
