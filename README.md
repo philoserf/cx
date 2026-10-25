@@ -160,8 +160,8 @@ Run `task bench` to regenerate.
 task setup    # Install the Homebrew toolchain from the Brewfile
 task check    # lint, then test — the gate
 task test     # cx selftest, then the integration tests
-task lint     # shellcheck + shfmt for shell, biome for JS
-task fmt      # Auto-format shell scripts and JS
+task lint     # shellcheck + shfmt for shell, biome for JS, prettier for Markdown
+task fmt      # Auto-format shell scripts, JS and Markdown
 task bench    # Benchmark commands
 ```
 
@@ -177,7 +177,7 @@ failed run still leaves the address book as it found it.
 
 Requires macOS with Contacts automation permission granted. `task setup`
 installs the rest from the `Brewfile`: shellcheck, shfmt and bun for `task lint`,
-and `gdate` from coreutils for `task bench`. Biome is pinned in `Taskfile.yml`.
+and `gdate` from coreutils for `task bench`. Biome and Prettier are pinned in `Taskfile.yml`.
 
 ## License
 
