@@ -157,6 +157,8 @@ Run `task bench` to regenerate.
 ## Development
 
 ```bash
+task setup    # Install the Homebrew toolchain from the Brewfile
+task check    # lint, then test — the gate
 task test     # cx selftest, then the integration tests
 task lint     # shellcheck + shfmt for shell, biome for JS
 task fmt      # Auto-format shell scripts and JS
@@ -173,8 +175,9 @@ creating contacts prefixed `CxTest_<pid>_`. It cleans up by searching that
 prefix rather than by replaying a list it built as it went, so an interrupted or
 failed run still leaves the address book as it found it.
 
-Requires macOS with Contacts automation permission granted. `task lint` needs
-shellcheck, shfmt and bun; `task bench` needs `gdate` from coreutils.
+Requires macOS with Contacts automation permission granted. `task setup`
+installs the rest from the `Brewfile`: shellcheck, shfmt and bun for `task lint`,
+and `gdate` from coreutils for `task bench`. Biome is pinned in `Taskfile.yml`.
 
 ## License
 

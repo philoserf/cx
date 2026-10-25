@@ -3,8 +3,21 @@ version: "3"
 vars:
   SHELL_FILES: cx tests/test.sh tests/bench.sh
   INSTALL_DIR: "{{.HOME}}/.local/bin"
+  # Pinned so a Biome release cannot change the lint result. Bump with biome.json's $schema.
+  BIOME: bunx @biomejs/biome@2.6.3
 
 tasks:
+  setup:
+    desc: Install the Homebrew toolchain
+    cmds:
+      - brew bundle
+
+  check:
+    desc: Lint, then test
+    cmds:
+      - task: lint
+      - task: test
+
   install:
     desc: Symlink cx to ~/.local/bin
     cmds:
@@ -36,10 +49,10 @@ tasks:
     cmds:
       - shellcheck {{.SHELL_FILES}}
       - shfmt -d {{.SHELL_FILES}}
-      - bunx @biomejs/biome check cx.js
+      - "{{.BIOME}} check cx.js"
 
   fmt:
     desc: Format shell scripts and JavaScript
     cmds:
       - shfmt -w {{.SHELL_FILES}}
-      - bunx @biomejs/biome check --fix cx.js
+      - "{{.BIOME}} check --fix cx.js"
