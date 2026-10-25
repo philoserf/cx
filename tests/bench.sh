@@ -28,11 +28,13 @@ cleanup() {
 			done
 	} || true
 	# Say so rather than exiting quietly: a sweep that could not run is the
-	# failure this whole mechanism exists to prevent.
+	# failure this whole mechanism exists to prevent. An empty count means the
+	# query itself failed, and that is unknown, not clean. Stale prefixes from
+	# runs that died are swept at the start of tests/test.sh.
 	local left
 	left=$("$CX" search "$TEST_PREFIX" --format json 2>/dev/null |
 		/usr/bin/jq -r "length" 2>/dev/null) || left=""
-	if [[ "${left:-0}" != "0" ]]; then
+	if [[ "$left" != "0" ]]; then
 		echo "  WARNING: ${left:-?} contact(s) matching $TEST_PREFIX remain"
 	fi
 	return $status
