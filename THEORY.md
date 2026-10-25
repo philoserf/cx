@@ -409,7 +409,7 @@ What is left is smaller and none of it is filed, because none of it is yet a def
   too noisy, AND-ing several terms is the mitigation, and `parseArgs` already collects them.
 - **Unicode normalisation.** The matcher inherits `whose({_contains})`'s diacritic
   sensitivity deliberately, so that the rewrite changed no comparison behaviour. Whether
-  that is the *right* behaviour is a separate question nobody has asked, and folding NFC
+  that is the _right_ behaviour is a separate question nobody has asked, and folding NFC
   would be a new promise rather than a restored one.
 - **The size of the address book.** Search is now linear in it. At a few hundred contacts
   that is 1.2s and better than what it replaced on every query but a narrow hit. At ten

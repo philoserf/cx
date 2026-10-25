@@ -1,6 +1,6 @@
 # cx Walkthrough
 
-*2026-09-14T20:35:38Z by Showboat 0.6.1*
+_2026-09-14T20:35:38Z by Showboat 0.6.1_
 <!-- showboat-id: 089f1964-7276-44b7-927f-16504d093370 -->
 
 ## Overview
@@ -59,7 +59,7 @@ JavaScript over plain data — no Apple Events, no permission prompt, no
 address book. Everything below it talks to Contacts.app.
 
 So position answers a question you would otherwise have to read the body to
-answer: *does this touch Contacts?* Keep it that way when adding a function.
+answer: _does this touch Contacts?_ Keep it that way when adding a function.
 
 Two consequences follow from that line, and they are the two ideas the rest of
 this document keeps returning to:
@@ -517,7 +517,7 @@ This is the performance story, and it is the whole performance story.
 
 `person.id()` is one Apple Event. A loop over 340 contacts calling `.id()` on
 each is 340 events, and that is how `cx list` once took 47 seconds. But
-`app.people.id()` — plural access on the *collection* — fetches every id in a
+`app.people.id()` — plural access on the _collection_ — fetches every id in a
 single event.
 
 ```bash
@@ -629,8 +629,8 @@ The second half was cost. Every hit was a separate `readSummary`, so a broad
 query paid one Apple Event per property per contact. `cx search a` matched 267
 of 340 contacts and took **55 seconds**.
 
-What dissolves both: the collections are not *queryable*, but they are
-*readable in bulk*. `app.people.emails.value()` returns all 340 nested arrays
+What dissolves both: the collections are not _queryable_, but they are
+_readable in bulk_. `app.people.emails.value()` returns all 340 nested arrays
 in one Apple Event, in 128ms. So the fetch moved to plural access and the match
 moved into JavaScript.
 
@@ -743,9 +743,9 @@ function matchesQuery(record, query) {
 
 Lowercase-and-`indexOf` reproduces `whose({_contains})` exactly. That matters
 more than it looks: `_contains` is **case-insensitive but diacritic-sensitive**
-— `MARK` finds Mark, and `Calderon` does *not* find `Calderón`. Both were
-measured and both are pinned in the selftest, so this rewrite changed *which
-fields* are searched and nothing about *how* a string is compared.
+— `MARK` finds Mark, and `Calderon` does _not_ find `Calderón`. Both were
+measured and both are pinned in the selftest, so this rewrite changed _which
+fields_ are searched and nothing about _how_ a string is compared.
 
 The falsy guard is the whole empty-and-null story in one clause: a null note
 (298 of 340 contacts here), an empty organization and an absent value all fall
@@ -1000,8 +1000,8 @@ function parseLabelValue(str, defaultLabel) {
 }
 ```
 
-The rule being reached for is *a colon that starts a URI scheme is not a label
-separator*. That used to be an allowlist of four schemes, which meant
+The rule being reached for is _a colon that starts a URI scheme is not a label
+separator_. That used to be an allowlist of four schemes, which meant
 `--url ssh://host` stored `//host` under a label named `ssh` — silently, and
 the same for `ftp:`, `sip:`, `xmpp:`, `file:` and every app scheme.
 
@@ -1118,7 +1118,7 @@ What `save` actually does was measured rather than assumed, because the repo
 had documented both answers at different times:
 
 **A mutation goes live in the running Contacts.app as it is made; `save`
-persists it to disk.** Push a person without saving and a *separate process*
+persists it to disk.** Push a person without saving and a _separate process_
 finds it. Quit Contacts.app and it is gone.
 
 That has a sharp consequence. A failure between `app.people.push` and
@@ -1317,14 +1317,14 @@ Destructive commands print what they would do and exit 5; re-run with
 
 ## Where to look first
 
-| If you are changing… | Start at |
-| --- | --- |
-| a contact field | one row in `SCALARS` or `MULTI`. If you are adding a case to a consumer, the row is missing a key. |
-| how input is accepted or rejected | `buildChange`, and `KNOWN_FLAGS` for the flag names. Nothing below the Contacts banner should need to know. |
-| what `cx search` matches | the `search` key on a catalogue row — and read `searchRows`' comment first, because a `guarded` row there breaks every query for everyone. |
-| how anything renders | the `format*` functions. If you reach for a JXA object there, the record is missing a field. |
-| performance | plural access, and whether the call is on an element collection rather than a `whose()` specifier. For search the cost is the fetch, not the match. |
-| anything that writes | `buildChange` for the validation, and remember that nothing which can fail may run after `app.people.push`. |
+| If you are changing…              | Start at                                                                                                                                            |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a contact field                   | one row in `SCALARS` or `MULTI`. If you are adding a case to a consumer, the row is missing a key.                                                  |
+| how input is accepted or rejected | `buildChange`, and `KNOWN_FLAGS` for the flag names. Nothing below the Contacts banner should need to know.                                         |
+| what `cx search` matches          | the `search` key on a catalogue row — and read `searchRows`' comment first, because a `guarded` row there breaks every query for everyone.          |
+| how anything renders              | the `format*` functions. If you reach for a JXA object there, the record is missing a field.                                                        |
+| performance                       | plural access, and whether the call is on an element collection rather than a `whose()` specifier. For search the cost is the fetch, not the match. |
+| anything that writes              | `buildChange` for the validation, and remember that nothing which can fail may run after `app.people.push`.                                         |
 
 ## Loose ends
 
@@ -1336,4 +1336,3 @@ Two things the code names as deliberately out of scope, both in search:
 - Only the first positional is read. Multi-term AND matching is the mitigation
   if matching email domains proves too noisy, and `parseArgs` already collects
   the rest.
-

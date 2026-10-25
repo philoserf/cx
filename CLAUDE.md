@@ -26,7 +26,7 @@ and this file is the summary that drifted.
 - `cx.js` — all JXA logic in a single file: field catalogues, arg parsing, input normalisation, Contacts reads and writes, text and JSON rendering, command dispatch
 - `tests/test.sh` — integration tests against real Contacts.app; cleans up by searching its `CxTest_<pid>_` prefix rather than by a list it built as it went
 - `tests/bench.sh` — timing harness behind `task bench`; regenerates the README performance table
-- `Taskfile.yml` — setup, check, install, uninstall, test, bench, lint, fmt tasks; pins the Biome version
+- `Taskfile.yml` — setup, check, install, uninstall, test, bench, lint, fmt tasks; pins the Biome and Prettier versions
 - `Brewfile` — the Homebrew toolchain `task setup` installs
 
 JXA has no module system. Everything is in one file by design, and section
@@ -100,8 +100,8 @@ task setup      # brew bundle: go-task, shellcheck, shfmt, bun, coreutils
 task check      # lint, then test — the gate
 task test       # selftest, then integration tests (creates/deletes test contacts)
 task bench      # Benchmark commands (requires gdate from coreutils)
-task lint       # shellcheck + shfmt on shell scripts, biome on cx.js
-task fmt        # shfmt + biome --fix
+task lint       # shellcheck + shfmt on shell scripts, biome on cx.js, prettier --check on Markdown
+task fmt        # shfmt + biome --fix + prettier --write
 task install    # Symlink cx to ~/.local/bin
 task uninstall  # Remove symlink
 ```
@@ -139,7 +139,7 @@ these two semantics were not, and unifying them breaks one of two workflows.
 - **A mutation goes live in the running app as it is made; `save` persists it to disk.** Measured: push a person without saving and a _separate process_ finds it; quit Contacts.app and it is gone. So a failure between the push and `saveOrFail(app)` strands a real, findable, half-built contact for the life of the Contacts process. That is why **nothing that can fail may run after `app.people.push`** — validation lives in `buildChange`, and the three writers contain no `exitWithError` between them. Keep it that way.
 - **Contacts validates nothing.** `--email "work:))))"` is accepted and stored. `cx` type-checks input and value-checks exactly one thing, dates. A write that succeeded was inspected by nobody else.
 - **Plural access is the difference between 0.8s and 47s.** `app.people.id()` fetches every id in one Apple Event; a loop calling `person.id()` costs one event each. This works on `app.people` and on a group's people, but **not** on a `whose()` specifier — measured at 13.3s for 256 names, worse than the loop.
-- **Contacts cannot express a predicate over an element collection.** `whose({note: {_contains: q}})` works; `whose({emails: {value: {_contains: q}}})` throws `Object does not have property "emails"`. That is why `cmdSearch` does not use `whose()` at all: it fetches every searchable property plurally and matches in JavaScript, which costs the same on 0 hits as on 286. A nested collection *fetch* is fine — `app.people.emails.value()` returns all 340 nested arrays in one event.
+- **Contacts cannot express a predicate over an element collection.** `whose({note: {_contains: q}})` works; `whose({emails: {value: {_contains: q}}})` throws `Object does not have property "emails"`. That is why `cmdSearch` does not use `whose()` at all: it fetches every searchable property plurally and matches in JavaScript, which costs the same on 0 hits as on 286. A nested collection _fetch_ is fine — `app.people.emails.value()` returns all 340 nested arrays in one event.
 - **A plural fetch of a `guarded` property throws for the whole array.** `app.people.namePrefix()` throws `-1728` outright, where `readCard`'s per-contact try/catch copes. So a `guarded` row must never carry `search: true` — `cx selftest` asserts it never does.
 - **Read a deleted object and JXA throws `-1728`.** Capture what you need before `app.delete`.
 - **Dates are date-only values stored at noon local time.** `new Date("1990-05-14")` parses as UTC midnight, which is the previous day west of Greenwich. Always go through `parseDateFlag` and `formatDate`.
