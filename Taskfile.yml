@@ -4,7 +4,7 @@ vars:
   SHELL_FILES: cx tests/test.sh tests/bench.sh
   INSTALL_DIR: "{{.HOME}}/.local/bin"
   # Pinned so a Biome release cannot change the lint result. Bump with biome.json's $schema.
-  BIOME: bunx @biomejs/biome@2.6.3
+  BIOME: bunx @biomejs/biome@2.6.4
   # Markdown only: biome owns cx.js and biome.json. Config in .prettierrc.json.
   PRETTIER: bunx prettier@3.9.10
 
