@@ -26,7 +26,7 @@ and this file is the summary that drifted.
 - `cx.js` — all JXA logic in a single file: field catalogues, arg parsing, input normalisation, Contacts reads and writes, text and JSON rendering, command dispatch
 - `tests/test.sh` — integration tests against real Contacts.app; cleans up by searching its `CxTest_<pid>_` prefix rather than by a list it built as it went, and first sweeps the prefixes of runs whose pid is no longer running
 - `tests/bench.sh` — timing harness behind `task bench`; regenerates the README performance table
-- `Taskfile.yml` — setup, check, install, uninstall, test, bench, lint, fmt tasks; pins the Biome and Prettier versions
+- `Taskfile.yml` — setup, check, install, uninstall, test, bench, lint, fmt tasks; pins the Biome version
 - `Brewfile` — the Homebrew toolchain `task setup` installs
 
 JXA has no module system. Everything is in one file by design, and section
@@ -100,8 +100,8 @@ task setup      # brew bundle: go-task, shellcheck, shfmt, bun, coreutils
 task check      # lint, then test — the gate
 task test       # selftest, then integration tests (creates/deletes test contacts)
 task bench      # Benchmark commands (requires gdate from coreutils)
-task lint       # shellcheck + shfmt on shell scripts, biome on cx.js, prettier --check on Markdown
-task fmt        # shfmt + biome --fix + prettier --write
+task lint       # shellcheck + shfmt on shell scripts, biome on cx.js, bun fmt --check on Markdown
+task fmt        # shfmt + biome --fix + bun fmt
 task install    # Symlink cx to ~/.local/bin
 task uninstall  # Remove symlink
 ```
