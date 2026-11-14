@@ -160,7 +160,7 @@ Run `task bench` to regenerate.
 task setup    # Install the Homebrew toolchain from the Brewfile
 task check    # lint, then test — the gate
 task test     # cx selftest, then the integration tests
-task lint     # shellcheck + shfmt for shell, biome for JS, prettier for Markdown
+task lint     # shellcheck + shfmt for shell, biome for JS, bun fmt for Markdown
 task fmt      # Auto-format shell scripts, JS and Markdown
 task bench    # Benchmark commands
 ```
@@ -179,7 +179,7 @@ every earlier run whose process has exited.
 
 Requires macOS with Contacts automation permission granted. `task setup`
 installs the rest from the `Brewfile`: shellcheck, shfmt and bun for `task lint`,
-and `gdate` from coreutils for `task bench`. Biome and Prettier are pinned in `Taskfile.yml`.
+and `gdate` from coreutils for `task bench`. Biome is pinned in `Taskfile.yml`; `bun fmt` formats the Markdown.
 
 ## License
 
